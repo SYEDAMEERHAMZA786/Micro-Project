@@ -1,0 +1,227 @@
+#include <xc.h>
+
+// Configuration for PIC16F877A
+#pragma config FOSC = HS
+#pragma config WDTE = OFF
+#pragma config PWRTE = OFF
+#pragma config BOREN = OFF
+#pragma config LVP = OFF
+#pragma config CPD = OFF
+#pragma config WRT = OFF
+#pragma config CP = OFF
+
+#define _XTAL_FREQ 4000000
+
+// Renamed Button Pins
+#define UP    RB1
+#define DOWN  RB2
+
+// Renamed total number of menu items
+#define menu 5
+
+unsigned char STEP_1_Genimg[]={0XEF,0X01,0XFF,0XFF,0XFF,0XFF,0X01,0X00,0X03,0X01,0X00,0X05};
+unsigned char STEP_1_Genimg_ACK[]={0XEF,0X01,0XFF,0XFF,0XFF,0XFF,0X07,0X00,0X03,0X00,0X00,0XA};
+const char menu_string1[] = {'A','D','D',' ','N','E','W',' ','F','I','N','G','E','R','P','R','I','N','T'};
+const char menu_string2[] = {'R','E','M','O','V','E',' ','F','I','N','G','E','R','P','R','I','N','T'};
+const char menu_string3[] = {'C','H','A','N','G','E',' ','P','A','S','S','W','O','R','D'};
+const char menu_string4[] = {'R','E','M','O','V','E',' ','F','I','N','G','E','R','P','R','I','N','T'};
+
+volatile unsigned char isactive = 0;
+unsigned char count = 0;
+unsigned char last_count = 255;
+
+// Function Prototypes (Corrected)
+void LCD_CMD(unsigned char cmd);
+void LCD_DATA(unsigned char data);
+void sendString(const char *str);
+void MENU_SCREEN(unsigned char var);
+
+void UART_Init(){
+    SPBRG = 25;
+    BRGH = 1;
+    SYNC=0;
+    SPEN=1;
+    TXEN=1;
+    CREN=1;
+}
+
+void UART_SEND(unsigned char data){
+    while(!TXIF);
+    TXREG=data;
+}
+void SEND_TX(unsigned char *data,int size){
+    for(int i = 0;i<size;i++){
+        UART_SEND(data[i]);
+    }
+
+
+}
+
+void ADD_FINGER(){
+    const char string[]={'P','L','A','C','E',' ','F','I','N','G','E','R'};
+    LCD_CMD(0x01); // Clear
+                LCD_CMD(0x80);
+    sendString(string);
+}
+// ---------------- LCD FUNCTIONS ----------------
+
+void LCD_CMD(unsigned char cmd)
+{
+    RC0 = 0;
+    PORTD = cmd;
+    RC1 = 1;
+    __delay_us(1);
+    RC1 = 0;
+        __delay_ms(2);
+
+}
+
+void LCD_DATA(unsigned char data)
+{
+    RC0 = 1;
+    PORTD = data;
+    RC1 = 1;
+    __delay_us(1);
+    RC1 = 0;
+    __delay_ms(2);
+}
+
+void sendString(const char string[]) {
+    int i=0;
+   
+    while(string[i]!='\0'){
+        LCD_DATA(string[i]);
+        i++;
+    }
+}
+
+// ---------------- SCREEN UPDATE ----------------
+// The function previously named MENU_SCREEN is used for screen update
+void MENU_SCREEN(unsigned char var)
+{
+    if(var==1){
+    sendString(menu_string1);
+    }
+    if(var==2){
+    sendString(menu_string2);
+    }
+     if(var==3){
+    sendString(menu_string3);
+    }
+     if(var==4){
+    sendString(menu_string4);
+    }
+ }
+
+
+// ---------------- INTERRUPT ----------------
+
+void __interrupt() ISR(void)
+{
+    if(INTF)
+    {
+        isactive = 1;
+        count = 0;
+        last_count = 255;
+        INTF = 0;
+    }
+}
+
+
+// ---------------- MAIN PROGRAM ----------------
+
+void main(void)
+{
+    // LCD Pins
+    TRISC0 = 0;
+    TRISC1 = 0;
+    TRISD  = 0;
+    PORTD=0X00;
+    
+
+ 
+
+    __delay_ms(20);
+    LCD_CMD(0x38);
+    LCD_CMD(0x0C);
+    LCD_CMD(0x06);
+    LCD_CMD(0x01);
+    __delay_ms(2);
+    // Buttons
+    TRISB0 = 1;
+    TRISB1 = 1;
+    TRISB2 = 1;
+
+    // Disable analog/comparator
+    ADCON1 = 0x06;
+    CMCON = 0x07;
+
+    PORTC = 0;
+    PORTD = 0;
+
+    // Interrupt Setup (RB0)
+    INTE = 1;
+    INTF = 0;
+    GIE = 1;
+    INTEDG = 0;
+  while(1)
+    { 
+        ADD_FINGER();
+        // -------- IDLE MODE --------
+        if(isactive == 0)
+        {
+            if(last_count != 200) 
+            {
+                LCD_CMD(0x01);
+                LCD_CMD(0x80);
+                sendString("PRESS INT BTN");
+                LCD_CMD(0xC0);
+                sendString("TO START MENU");
+                last_count = 200;
+            }
+        }
+
+        // -------- MENU MODE --------
+        else
+        {
+            if(count != last_count)
+            {
+                MENU_SCREEN(count);
+                last_count = count;
+            }
+
+            // ---------- UP BUTTON ----------
+            if(UP == 1) 
+            {
+                __delay_ms(40);
+                if(UP == 1)
+                {
+                    if(count == 0)
+                    {
+                        count = menu - 1;
+                    }
+                    else
+                    {
+                        count--;
+                    }
+                    while(UP == 1) ;
+                }
+            }
+
+            // ---------- DOWN BUTTON ----------
+            if(DOWN == 1)
+            {
+                __delay_ms(40);
+                if(DOWN == 1) 
+                {
+                    count++;
+                    if(count >= menu) 
+                    {
+                        count = 0;
+                    }
+                    while(DOWN == 1) ;
+                }
+            }
+        }
+    }
+}
