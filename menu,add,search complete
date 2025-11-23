@@ -1,0 +1,414 @@
+/*ports used :
+ RB0 for menu interrupt
+ RB1 for up button
+ RB2 for down button
+ RB3 for finger interrupt
+ RB4 to lock and unlock door
+ 
+ RC0,RC1,PORTD for LCD
+
+ 
+ 
+ */
+
+#include <xc.h>
+#pragma config FOSC = HS
+#pragma config WDTE = OFF
+#pragma config PWRTE = OFF
+#pragma config BOREN = OFF
+#pragma config LVP = OFF
+#pragma config CPD = OFF
+#pragma config WRT = OFF
+#pragma config CP = OFF
+
+#define _XTAL_FREQ 4000000
+#define UP    RB1
+#define DOWN  RB2
+#define FINGER RB3
+#define DOOR RB4
+
+#define menu 4
+
+unsigned char GenImg[]={0XEF,0X01,0XFF,0XFF,0XFF,0XFF,0X01,0X00,0X03,0X01,0X00,0X05};//size12
+unsigned char GenImg_ACK[]={0XEF,0X01,0XFF,0XFF,0XFF,0XFF,0X07,0X00,0X03,0X00,0X00,0X0A};//12
+unsigned char ImgToChar_1[]={0XEF,0X01,0XFF,0XFF,0XFF,0XFF,0X01,0X00,0X04,0X02,0X01,0X00,0X08};//13
+unsigned char ImgToChar_2[]={0XEF,0X01,0XFF,0XFF,0XFF,0XFF,0X01,0X00,0X04,0X02,0X02,0X00,0X09};//13
+unsigned char ImgToChar_ACK[]={0XEF,0X01,0XFF,0XFF,0XFF,0XFF,0X07,0X00,0X03,0X00,0X00,0X0A};//12
+unsigned char RegModel[]={0XEF,0X01,0XFF,0XFF,0XFF,0XFF,0X01,0X00,0X03,0X05,0X00,0X09};//12
+unsigned char RegModel_ACK[]={0XEF,0X01,0XFF,0XFF,0XFF,0XFF,0X07,0X00,0X03,0X00,0X00,0X0A};//12
+
+unsigned char GIRP[12];
+unsigned char ITCRP[12];
+unsigned char RMRP[12];
+unsigned char SRP[12];
+unsigned char SearchRP[15];
+unsigned int current_ID = 1;
+int open=0;
+
+const char menu_string1[] = {"ADD FINGER"};
+const char menu_string2[] = {"REMOVE FINGER"};
+const char menu_string3[] = {"CHANGE PASSWORD"};
+const char menu_string4[] = {"EXIT"};
+unsigned char No_Finger[]={"INVALID"};
+
+volatile unsigned char isactive = 0;
+unsigned char count = 0;
+unsigned char last_count = 255;
+
+void LCD_CMD(unsigned char cmd);
+void LCD_DATA(unsigned char data);
+void sendString(const char *str);
+void MENU_SCREEN(unsigned char var);
+
+void UART_Init(){
+    SPBRG = 25;
+    BRGH = 1;
+    SYNC=0;
+    SPEN=1;
+    TXEN=1;
+    CREN=1;
+}
+
+void UART_SEND(char arr){
+    while(!TXIF);
+    TXREG=arr;
+}
+
+void SEND_TX(const char *arr,int size){
+    for(int i = 0;i<size;i++){
+        UART_SEND(arr[i]);
+    }
+
+
+}
+
+unsigned char UART_READ(){
+    while(!RCIF);
+    return RCREG;
+}
+
+void ADD_FINGER(){
+    restart: 
+    LCD_CMD(0x01);
+    const char ret[]={"LIMIT REACHED"};
+
+    if(current_ID>=9){
+        sendString(ret);
+        return;
+    }
+    const char string[]={"PLACE FINGER"};
+    const char string2[]={"TRY AGAIN"};
+
+    sendString(string);
+    jump:
+    
+    //step1
+    SEND_TX(GenImg,12);
+    for(int i=0;i<12;i++){
+        GIRP[i]=UART_READ();
+    }
+    
+    for(int i=0;i<12;i++){
+        if(GIRP[i]!=GenImg_ACK[i]){
+         sendString(string2);
+         __delay_ms(2000);
+            goto jump;
+        
+        }
+    }
+    //step2
+    SEND_TX(ImgToChar_1,13);
+    for(int i=0;i<12;i++){
+        ITCRP[i]=UART_READ();
+    }
+    
+    for(int i=0;i<12;i++){
+        if(ITCRP[i]!=ImgToChar_ACK[i]){
+            goto restart;
+        }
+    }
+    //step3
+    const char string1[]={"REMOVE FINGER"};
+    sendString(string1);
+    __delay_ms(2000);
+    
+    //step4
+    again:
+    sendString(string);
+    
+    SEND_TX(GenImg,12);
+    for(int i=0;i<12;i++){
+        GIRP[i]=UART_READ();
+    }
+    
+    for(int i=0;i<12;i++){
+        if(GIRP[i]!=GenImg_ACK[i]){
+         sendString(string2);
+         __delay_ms(2000);
+         goto again;
+        }
+    }
+    //step5
+    SEND_TX(ImgToChar_2,13);
+    for(int i=0;i<12;i++){
+        ITCRP[i]=UART_READ();
+    }
+    
+    for(int i=0;i<12;i++){
+        if(ITCRP[i]!=ImgToChar_ACK[i]){
+            goto restart;
+        }
+    }
+    //step6
+        SEND_TX(RegModel,12);
+     for(int i=0;i<12;i++){
+        RMRP[i]=UART_READ();
+    }
+    
+    for(int i=0;i<12;i++){
+        if(RMRP[i]!=RegModel_ACK[i]){
+            goto restart;
+        }
+    }   
+        
+   //step7     
+    
+    unsigned char id_L = current_ID; 
+    unsigned char sum_L = 14 + current_ID;
+
+    unsigned char Store[] = {0xEF,0x01,0xFF,0xFF,0xFF,0xFF,0x01,0x00,0x06,0x06,0x01, 0, id_L, 0, sum_L};
+    
+    SEND_TX(Store, 15);
+
+    for(int i=0; i<12; i++){
+        SRP[i] = UART_READ();
+    }
+
+    if(SRP[9] == 0x00){
+        sendString("SAVED");
+        current_ID++;
+    }
+    else {
+        sendString("ERROR SAVING");
+    }
+    __delay_ms(2000);
+}
+
+
+int SEARCH_FINGER(){
+    const char string2[]={"TRY AGAIN"};
+    unsigned char Search[]={0xEF,0x01,0xFF,0xFF,0xFF,0xFF,0x01,0x00,0x08,0x04,0x01,0x00,0x01,0x00,0x09,0x00,0x18};
+
+    jump:
+SEND_TX(GenImg,12);
+    for(int i=0;i<12;i++){
+        GIRP[i]=UART_READ();
+    }
+    
+    
+        if(GIRP[9]!=0X00){
+         sendString(string2);
+            goto jump;
+        }
+    
+SEND_TX(ImgToChar_1,13);
+for(int i=0;i<12;i++){
+        ITCRP[i]=UART_READ();
+    }
+    if(ITCRP[9]!=0X00){
+         sendString(string2);
+            goto jump;
+        }
+
+    SEND_TX(Search,17);
+   
+    for(int i=0;i<16;i++){
+        SearchRP[i]=UART_READ();
+    }
+    if(SearchRP[9]==0X00){
+        return SearchRP[11];
+    }
+    else 
+        return 0;
+
+
+}
+
+
+
+void LCD_CMD(unsigned char cmd)
+{
+    RC0 = 0;
+    PORTD = cmd;
+    RC1 = 1;
+    __delay_us(1);
+    RC1 = 0;
+        __delay_ms(2);
+
+}
+
+void LCD_DATA(unsigned char data)
+{
+    RC0 = 1;
+    PORTD = data;
+    RC1 = 1;
+    __delay_us(1);
+    RC1 = 0;
+    __delay_ms(2);
+}
+
+void sendString(const char string[]) {
+    int i=0;
+   
+    while(string[i]!='\0'){
+        LCD_DATA(string[i]);
+        i++;
+    }
+}
+
+void MENU_SCREEN(unsigned char var)
+{
+    if(var==1){
+    sendString(menu_string1);
+    }
+    if(var==2){
+    sendString(menu_string2);
+    }
+     if(var==3){
+    sendString(menu_string3);
+    }
+     if(var==4){
+    sendString(menu_string4);
+    }
+ }
+
+void __interrupt() ISR(void)
+{
+    if(INTF)
+    {
+        isactive = 1;
+        count = 0;
+        last_count = 255;
+        INTF = 0;
+    }
+}
+
+void main(void)
+{
+    // --- Initialization ---
+    
+    TRISC0 = 0; // RS
+    TRISC1 = 0; // EN
+    TRISD = 0x00; // Data Port
+    PORTD = 0x00;
+    
+    // Initialize Buttons
+    TRISB0 = 1; // INT
+    TRISB1 = 1; // UP
+    TRISB2 = 1; // DOWN
+
+    // Analog Setup
+    ADCON1 = 0x06;
+    CMCON = 0x07;
+
+    // LCD Start-up
+    __delay_ms(20);
+    LCD_CMD(0x38); // 8-bit mode, 2 lines
+    LCD_CMD(0x0C); // Display ON, Cursor OFF
+    LCD_CMD(0x06); // Auto Increment
+    LCD_CMD(0x01); // Clear Screen
+    __delay_ms(2);
+
+    // Interrupt Setup
+    INTE = 1;
+    INTF = 0;
+    GIE = 1;
+    INTEDG = 0; // Interrupt on falling edge (button press)
+
+    // Show Initial Screen ONCE
+      // Clear it
+
+    // Force an update for the Idle screen
+    last_count = 255; 
+    
+    while(1)
+    {
+   
+        
+   if(FINGER == 1){
+       open=SEARCH_FINGER();
+       if(open<=0 || open>9){
+           sendString(No_Finger);
+       }
+       else {
+           
+           DOOR=1;
+           __delay_ms(10000);
+           DOOR=0;
+       }
+   }
+      
+        
+   //    ADD_FINGER(); 
+   // __delay_ms(2000); // Show it for 2 seconds
+   // LCD_CMD(0x01);  
+        // -------- IDLE MODE (isactive = 0) --------
+        if(isactive == 0)
+        {
+            // Only update LCD if we haven't drawn this screen yet
+            if(last_count != 200) 
+            {
+                LCD_CMD(0x01); // Clear
+                LCD_CMD(0x80);
+                sendString("PRESS INT BTN");
+                LCD_CMD(0xC0);
+                sendString("TO START MENU");
+                
+                last_count = 200; // Set flag so we don't update again
+            }
+        }
+
+        // -------- MENU MODE (isactive = 1) --------
+        else
+        {
+            // Only update LCD if count has changed
+            if(count != last_count)
+            {
+                LCD_CMD(0x01); // Clear screen for new menu item
+                LCD_CMD(0x80);
+                
+                // Fix: Your count starts at 0, but MENU_SCREEN checked 1,2,3
+                // Pass count + 1, or fix MENU_SCREEN logic
+                MENU_SCREEN(count + 1); 
+                
+                last_count = count; // Save state
+            }
+
+            // ---------- UP BUTTON ----------
+            if(UP == 1) 
+            {
+                __delay_ms(50); // Debounce
+                if(UP == 1)
+                {
+                    if(count == 0) count = menu - 1;
+                    else count--;
+                    
+                    while(UP == 1); // Wait for release
+                }
+            }
+
+            // ---------- DOWN BUTTON ----------
+            if(DOWN == 1)
+            {
+                __delay_ms(50); // Debounce
+                if(DOWN == 1) 
+                {
+                    count++;
+                    if(count >= menu) count = 0;
+                    
+                    while(DOWN == 1); // Wait for release
+                }
+            }
+        }
+    }
+}
