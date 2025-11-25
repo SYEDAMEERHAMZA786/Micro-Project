@@ -1,18 +1,9 @@
-// 1. Check if button is pressed (Active High)
 if (CONFIRM == 1) 
 {
-    // 2. Wait 50ms for the mechanical noise to settle
     __delay_ms(50);
-
-    // 3. Check AGAIN. If it is still 1, it's a real press.
     if (CONFIRM == 1) 
     {
-        // --- YOUR ACTION GOES HERE ---
-        ADD_FINGER(); 
-        // -----------------------------
-
-        // 4. (Optional) Wait for user to let go of the button
-        // This prevents the menu from scrolling 100 times if they hold it.
+        return 0;
         while (CONFIRM == 1); 
     }
 }
