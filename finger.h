@@ -2,13 +2,10 @@
 #define ADD_FINGER_H
 #define CONFIRM RB3
 extern unsigned char current_ID;
-extern const char GenImg[];
-extern const char GenImg_ACK[];
-extern const char ImgToChar_1[];
-extern const char ImgToChar_2[];
-extern const char ImgToChar_ACK[];
-extern const char RegModel[];
-extern const char RegModel_ACK[];
+extern const char GenImg[12];
+extern const char ImgToChar_1[13];
+extern const char ImgToChar_2[13];
+extern const char RegModel[12];
 
 extern unsigned char GIRP[12];//GIRP matlab GenImgRecievedPacket
 extern unsigned char ITCRP[12];//ITCRP matlab ImgToCharRecievedPacket
