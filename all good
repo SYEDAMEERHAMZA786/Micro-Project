@@ -1,0 +1,172 @@
+#include <xc.h>
+#include "LCD.h"
+#include "UART_Communication.h"
+#include "ADD_FINGER.h"
+#include "SEARCH_FINGER.h"
+#include "DELETE_FINGER.h"
+#include "MENU.h"
+
+#pragma config FOSC = HS
+#pragma config WDTE = OFF
+#pragma config PWRTE = OFF
+#pragma config BOREN = OFF
+#pragma config LVP = OFF
+#pragma config CPD = OFF
+#pragma config WRT = OFF
+#pragma config CP = OFF
+
+#define _XTAL_FREQ 4000000
+#define UP    RB1
+#define DOWN  RB2
+#define CONFIRM RB3
+#define TOUCH RB4
+#define DOOR RB5
+
+#define one RA0
+#define two RA1
+#define three RA2
+#define four RA3
+#define menu 4
+
+const char GenImg[12]={0XEF,0X01,0XFF,0XFF,0XFF,0XFF,0X01,0X00,0X03,0X01,0X00,0X05};
+const char ImgToChar_1[13]={0XEF,0X01,0XFF,0XFF,0XFF,0XFF,0X01,0X00,0X04,0X02,0X01,0X00,0X08};
+const char ImgToChar_2[13]={0XEF,0X01,0XFF,0XFF,0XFF,0XFF,0X01,0X00,0X04,0X02,0X02,0X00,0X09};
+const char RegModel[12]={0XEF,0X01,0XFF,0XFF,0XFF,0XFF,0X01,0X00,0X03,0X05,0X00,0X09};
+
+unsigned char GIRP[12];
+unsigned char ITCRP[12];
+unsigned char RMRP[12];
+unsigned char SRP[12];
+unsigned char SearchRP[16];
+unsigned char DRP[12];
+unsigned char open=0;
+unsigned char current_ID=1;
+unsigned char password=0; 
+
+const char menu_string1[] = {"1-ADD FINGER"};
+const char menu_string2[] = {"2-REMOVE FINGER"};
+const char menu_string3[] = {"3-CHANGE PASSWORD"};
+const char menu_string4[] = {"4-EXIT"};
+unsigned char No_Finger[]={"INVALID"};
+
+volatile unsigned char isactive = 0;
+unsigned char count = 0;
+unsigned char last_count = 255;
+
+void __interrupt() ISR(void)
+{
+    if(INTF)
+    {
+        isactive = 1;
+        count = 0;
+        last_count = 255;
+        INTF = 0;
+    }
+}
+
+void main(void)
+{
+    UART_Init();
+    TRISC0 = 0;
+    TRISC1 = 0;
+    TRISC2 = 0;
+    TRISC3 = 0;
+    TRISD = 0x00;
+    PORTD = 0x00;
+    
+    TRISB0 = 1;
+    TRISB1 = 1;
+    TRISB2 = 1; 
+    TRISB3 = 1; 
+unsigned char confirm_press=0;
+    ADCON1 = 0x06;
+    CMCON = 0x07;
+    
+    __delay_ms(20);
+    LCD_CMD(0x38); 
+    LCD_CMD(0x0C); 
+    LCD_CMD(0x06); 
+    LCD_CMD(0x01); 
+    __delay_ms(2);
+
+    INTE = 1;
+    INTF = 0;
+    GIE = 1;
+    INTEDG = 0;
+    
+    last_count = 255; 
+    
+    while(1)
+    {
+        if(isactive == 0)
+        {
+            if(last_count != 200) 
+            {
+                LCD_CMD(0x01);
+                sendString("PRESS INT BTN");
+                LCD_CMD(0xC0);
+                sendString("TO START MENU");
+                last_count = 200; 
+            }
+        }
+        else
+        {
+            if(count != last_count)
+            {
+                LCD_CMD(0x01);
+                MENU_SCREEN(count + 1); 
+                last_count = count;
+            }
+
+            if(UP == 1) 
+            {
+                __delay_ms(50);
+                if(UP == 1)
+                {
+                    if(count == 0) count = menu - 1;
+                    else count--;
+                    while(UP == 1);
+                }
+            }
+
+            if(DOWN == 1)
+            {
+                __delay_ms(50);
+                if(DOWN == 1) 
+                {
+                    count++;
+                    if(count >= menu) count = 0;
+                    while(DOWN == 1);
+                }
+            }
+            
+            if(CONFIRM == 1)
+{
+    __delay_ms(50);
+    if(CONFIRM == 1)
+    {
+       
+        LCD_CMD(0x01);       
+        sendString("DEBUG: ENTERED");
+        __delay_ms(1000);  
+        
+
+        if(count == 0) {
+            ADD_FINGER(); 
+        }
+        else if(count == 1) {
+            delete_Fingerprint(); 
+        }
+        else if(count == 2) {
+            return; 
+        }
+        // ... rest of code
+        
+        last_count = 255; 
+        
+        while(CONFIRM == 1); 
+    }
+}
+        }
+    }
+}
