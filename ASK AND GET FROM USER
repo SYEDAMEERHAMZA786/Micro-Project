@@ -1,0 +1,164 @@
+#include <xc.h>
+#define _XTAL_FREQ 4000000
+#define one RB0
+#define two RB1
+#define three RB2
+#define four RB3
+
+unsigned char password[4];
+
+void LCD_CMD(unsigned char cmd)
+{
+    RC0 = 0;
+    PORTD = cmd;
+    RC1 = 1;
+    __delay_us(1);
+    RC1 = 0;
+    __delay_ms(2);
+}
+
+void LCD_DATA(unsigned char data)
+{
+    RC0 = 1;
+    PORTD = data;
+    RC1 = 1;
+    __delay_us(1);
+    RC1 = 0;
+    __delay_ms(2);
+}
+
+void sendString(const char string[]) {
+    int i=0;
+    while(string[i]!='\0'){
+        LCD_DATA(string[i]);
+        i++;
+    }
+}
+
+void GetFromUser(){
+    int i;
+    for(i=0;i<4;){
+        if(one==1){
+            password[i]=0X01;
+            sendString("1");
+            i++;
+            __delay_ms(250);      
+            while(one==1);          
+        }
+        else if(two==1){
+            password[i]=0X02;
+            sendString("2");
+            i++;
+            __delay_ms(250);        
+            while(two==1);          
+        }
+        else if(three==1){
+            password[i]=0X03;
+            sendString("3");
+            i++;
+            __delay_ms(250);        
+            while(three==1);        
+        }
+        else if(four==1){
+            password[i]=0X04;
+            sendString("4");
+            i++;
+            __delay_ms(250);        
+            while(four==1);         
+        }
+    }
+    sendString("SAVED!");
+    return;
+}
+
+void AskFromUser(){
+    int i;
+    LCD_CMD(0x01); 
+    __delay_ms(2);
+    sendString("Enter Password:");
+    LCD_CMD(0xC0);  
+    
+    for(i=0; i<4; ){
+        if(one==1){
+         
+            if(password[i] != 0x01){
+                LCD_CMD(0x01);
+                sendString("WRONG!");
+                __delay_ms(2000);
+                return;
+            }
+            sendString("$");
+            i++;
+            __delay_ms(250);
+            while(one==1);
+        }
+        else if(two==1){
+           
+            if(password[i] != 0x02){
+                LCD_CMD(0x01);
+                sendString("WRONG!");
+                __delay_ms(2000);
+                return;
+            }
+            sendString("$");
+            i++;
+            __delay_ms(250);
+            while(two==1);
+        }
+        else if(three==1){
+            
+            if(password[i] != 0x03){
+                LCD_CMD(0x01);
+                sendString("WRONG!");
+                __delay_ms(2000);
+                return;
+            }
+            sendString("$");
+            i++;
+            __delay_ms(250);
+            while(three==1);
+        }
+        else if(four==1){
+            
+            if(password[i] != 0x04){
+                LCD_CMD(0x01);
+                sendString("WRONG!");
+                __delay_ms(2000);
+                return;
+            }
+            sendString("$");
+            i++;
+            __delay_ms(250);
+            while(four==1);
+        }
+    }
+    
+
+    LCD_CMD(0x01);
+    __delay_ms(2);
+    sendString("CORRECT!");
+    __delay_ms(2000);
+    return;
+}
+
+void main(void) {
+    TRISC0 = 0;      
+    TRISC1 = 0;      
+    TRISD = 0x00;    
+    PORTD = 0x00;
+    
+    TRISB = 0x0F;    
+    PORTB = 0x00;
+    
+    __delay_ms(20);
+    LCD_CMD(0x38);  
+    LCD_CMD(0x0C);   
+    LCD_CMD(0x06);   
+    LCD_CMD(0x01);  
+    __delay_ms(2);
+    
+    GetFromUser();
+    AskFromUser();
+    
+    while(1);       
+}
