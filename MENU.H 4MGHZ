@@ -1,0 +1,32 @@
+#ifndef MENU_H
+#define MENU_H
+#define CONFIRM RB3
+
+
+void MENU_SCREEN(unsigned char var)
+{
+    
+if (CONFIRM == 1) {
+__delay_ms(50);
+if (CONFIRM == 1){
+while (CONFIRM == 1); 
+return ;
+}
+}
+    if(var==1){
+    sendString("1-ADD FINGER");
+    }
+    if(var==2){
+    sendString("2-REMOVE FINGER");
+    }
+     if(var==3){
+    sendString("3-OPEN W PASSWORD");
+    }
+     if(var==4){
+    sendString("4-CHANGE PASSWORD");
+    }
+    if(var==5){
+    sendString("5-EXIT");
+    }
+ }
+#endif
