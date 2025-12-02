@@ -1,0 +1,33 @@
+#ifndef LCD_H
+#define LCD_H
+#define _XTAL_FREQ 4000000UL 
+void LCD_CMD(unsigned char cmd)
+{
+    RC0 = 0;
+    PORTD = cmd;
+    RC1 = 1;
+    __delay_us(1);
+    RC1 = 0;
+        __delay_ms(2);
+
+}
+
+void LCD_DATA(unsigned char data)
+{
+    RC0 = 1;
+    PORTD = data;
+    RC1 = 1;
+    __delay_us(1);
+    RC1 = 0;
+    __delay_ms(2);
+}
+
+void sendString(const char string[]) {
+    int i=0;
+   
+    while(string[i]!='\0'){
+        LCD_DATA(string[i]);
+        i++;
+    }
+}
+#endif
