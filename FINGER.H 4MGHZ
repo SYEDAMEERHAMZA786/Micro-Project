@@ -1,0 +1,149 @@
+#ifndef ADD_FINGER_H
+#define ADD_FINGER_H
+
+#define CONFIRM RB3
+
+extern unsigned char current_ID;
+extern const char GenImg[12];
+extern const char ImgToChar_1[13];
+extern const char ImgToChar_2[13];
+extern const char RegModel[12];
+extern unsigned char GIRP[12];
+extern unsigned char ITCRP[12]; 
+extern unsigned char RMRP[12];   
+extern unsigned char SRP[12];    
+
+
+
+void ADD_FINGER() {
+    unsigned char retry = 0;
+    
+    LCD_CMD(0x01);
+    
+    if (current_ID >= 9) {
+        sendString("LIMIT REACHED");
+        __delay_ms(2000);
+        return;
+    }
+    
+    while (1) {
+        LCD_CMD(0x01);
+        sendString("PLACE FINGER");
+        __delay_ms(1000);
+      
+        SEND_TX(GenImg, 12);
+
+        for (int i = 0; i < 12; i++) {
+            GIRP[i] = UART_READ();
+        }
+        
+ 
+        if (GIRP[9] == 0x00) {
+            break;
+        } else {
+            LCD_CMD(0x01);
+            sendString("TRY AGAIN");
+            __delay_ms(2000);
+            retry++;
+            
+            if (retry >= 3) {
+                LCD_CMD(0x01);
+                sendString("TOO MANY TRIES");
+                __delay_ms(2000);
+                return;
+            }
+        }
+    }
+    
+    SEND_TX(ImgToChar_1, 13);
+    for (int i = 0; i < 12; i++) {
+        ITCRP[i] = UART_READ();
+    }
+    
+    if (ITCRP[9] != 0x00) {
+        LCD_CMD(0x01);
+        sendString("ERROR: RETRY");
+        __delay_ms(2000);
+        return;
+    }
+    
+    LCD_CMD(0x01);
+    sendString("REMOVE FINGER");
+    __delay_ms(2000);
+    
+
+    retry = 0;
+    while (1) {
+        LCD_CMD(0x01);
+        sendString("PLACE AGAIN");
+        __delay_ms(1000);
+        
+        SEND_TX(GenImg, 12);
+        
+
+        for (int i = 0; i < 12; i++) {
+            GIRP[i] = UART_READ();
+        }
+        
+
+        if (GIRP[9] == 0x00) {
+            break;
+        } else {
+            LCD_CMD(0x01);
+            sendString("TRY AGAIN");
+            __delay_ms(2000);
+            retry++;
+            
+            if (retry >= 3) {
+                LCD_CMD(0x01);
+                sendString("TOO MANY TRIES");
+                __delay_ms(2000);
+                return;
+            }
+        }
+    }
+   
+    SEND_TX(ImgToChar_2, 13);
+    for (int i = 0; i < 12; i++) {
+        ITCRP[i] = UART_READ();
+    }
+    
+    if (ITCRP[9] != 0x00) {
+        LCD_CMD(0x01);
+        sendString("ERROR: RETRY");
+        __delay_ms(2000);
+        return;
+    }
+    
+    SEND_TX(RegModel, 12);
+    for (int i = 0; i < 12; i++) {
+        RMRP[i] = UART_READ();
+    }
+    
+    if (RMRP[9] != 0x00) {
+        LCD_CMD(0x01);
+        sendString("MISMATCH");
+        __delay_ms(2000);
+        return;
+    }
+    
+    unsigned char id_L = current_ID;
+    unsigned char sum_L = 14 + current_ID;
+    unsigned char Store[15] = {0xEF, 0x01, 0xFF, 0xFF, 0xFF, 0xFF,0x01, 0x00, 0x06, 0x06, 0x01,0x00, id_L, 0x00, sum_L};
+    
+    SEND_TX(Store, 15);
+    for (int i = 0; i < 12; i++) {
+        SRP[i] = UART_READ();
+    }
+    
+    LCD_CMD(0x01);
+    if (SRP[9] == 0x00) {
+        sendString("SAVED");
+        current_ID++;
+    } else {
+        sendString("ERROR SAVING");
+    }
+    __delay_ms(2000);
+}
+
+#endif
