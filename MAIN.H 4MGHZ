@@ -1,0 +1,259 @@
+#include <xc.h>
+#include "LCD.h"
+#include "UART_Communication.h"
+#include "ADD_FINGER.h"
+#include "SEARCH_FINGER.h"
+#include "DELETE_FINGER.h"
+#include "Enter_Password.h"
+#include "MENU.h"
+#define _XTAL_FREQ 4000000UL   // 20 MHz crystal
+
+// CONFIGURATION BITS
+#pragma config FOSC = HS
+#pragma config WDTE = OFF
+#pragma config PWRTE = ON
+#pragma config BOREN = ON
+#pragma config LVP = OFF
+#pragma config CPD = OFF
+#pragma config WRT = OFF
+#pragma config CP = OFF
+// Buttons
+#define TOUCH       RB0
+#define UP          RB1
+#define DOWN        RB2
+#define CONFIRM     RB3
+#define DOOR        RB5  
+#define menu_button RB6
+#define BUZZER      RB7
+#define MENU_ITEMS 5
+
+const char GenImg[12] = {0xEF, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0x00, 0x03, 0x01, 0x00, 0x05};
+const char ImgToChar_1[13] = {0xEF, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0x00, 0x04, 0x02, 0x01, 0x00, 0x08};
+const char ImgToChar_2[13] = {0xEF, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0x00, 0x04, 0x02, 0x02, 0x00, 0x09};
+const char RegModel[12] = {0xEF, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0x00, 0x03, 0x05, 0x00, 0x09};
+
+unsigned char GIRP[12];
+unsigned char ITCRP[12];
+unsigned char RMRP[12];
+unsigned char SRP[12];
+unsigned char SearchRP[16];
+unsigned char DRP[12];
+unsigned char current_ID = 1;
+volatile unsigned char isactive = 0;
+unsigned char count = 0;
+unsigned char last_count = 255;
+
+void __interrupt() ISR(void)
+{
+    if(INTF)
+    {
+        INTF = 0;
+        if(isactive == 0)
+        {
+            unsigned char fingerprint_id = 0;
+            fingerprint_id = SEARCH_FINGER();
+            if(fingerprint_id > 0 && fingerprint_id <= 9)
+            {
+                DOOR = 1;
+                LCD_CMD(0x01);
+                sendString("ACCESS GRANTED");
+                __delay_ms(5000);
+                DOOR = 0;
+                
+                BUZZER=1;
+                __delay_ms(250);
+                BUZZER=0;
+                __delay_ms(100);
+                BUZZER=1;
+                __delay_ms(100);
+                BUZZER=0;
+                __delay_ms(100);
+                BUZZER=1;
+
+                LCD_CMD(0x01);
+                sendString("PRESS BLUE BTN");
+                LCD_CMD(0xC0);
+                sendString("TO OPEN MENU");
+            }
+            else
+            {
+                LCD_CMD(0x01);
+                sendString("ACCESS DENIED");
+                BUZZER=1;
+                __delay_ms(250);
+                BUZZER=0;
+                __delay_ms(2000);
+                LCD_CMD(0x01);
+                sendString("S.AMEER HAMZA");
+               
+            }
+        }
+    }
+}
+
+void main(void)
+{
+    // initialize communication
+    UART_Init();
+    
+     //PORT A
+    TRISA0=1;
+    TRISA1=1;
+    TRISA2=1;
+    TRISA3=1;
+    TRISA4=1; 
+    // Disable analog inputs 
+    ADCON1 = 0x06;
+    CMCON = 0x07;
+    
+    
+    // Configure LCD control pins as outputs
+    TRISC0 = 0;  // lcd RS
+    TRISC1 = 0;  // lcd EN
+    
+    // PORT D LCD
+    TRISD = 0x00;
+    PORTD = 0x00;
+    
+    // Configure PORT B
+    TRISB = 0XFF;
+    DOOR=0;
+    BUZZER=0;
+    
+    __delay_ms(20);
+    LCD_CMD(0x38);  // 8-bit mode, 2 lines
+    LCD_CMD(0x0C);  // Display ON, Cursor OFF
+    LCD_CMD(0x06);  // Auto Increment
+    LCD_CMD(0x01);  // Clear Screen
+    __delay_ms(2);
+    
+    //external interrupt  RB0
+    INTE = 1;
+    INTF = 0;
+    INTEDG = 0;
+    GIE = 1;
+    
+    // Initialize display
+    last_count = 255;
+    
+
+    while(1)
+    {
+        if(menu_button == 1)
+        {
+            __delay_ms(50);
+            if(menu_button == 1)
+            {
+                isactive = 1;  
+                count = 0;          
+                last_count = 255;  
+                while(menu_button == 1);  
+        }
+        if(isactive == 0)
+        {
+            if(last_count != 200)
+            {
+                LCD_CMD(0x01);
+                sendString("THERE'S ALWAYS");
+                LCD_CMD(0xC0);
+                sendString("BIGR FISH INPOND");
+                last_count = 200;
+            }
+        }
+        else
+        {
+            if(count != last_count)
+            {
+                LCD_CMD(0x01);
+                MENU_SCREEN(count + 1);
+                last_count = count;
+            }
+            if(UP == 1)
+            {
+                __delay_ms(50);
+                if(UP == 1)
+                {
+                    if(count == 0) 
+                        count = MENU_ITEMS - 1;
+                    else 
+                        count--;
+                    while(UP == 1);
+                }
+            }
+            if(DOWN == 1)
+            {
+                __delay_ms(50);
+                if(DOWN == 1)
+                {
+                    count++;
+                    if(count >= MENU_ITEMS) 
+                        count = 0;
+                    while(DOWN == 1);
+                }
+            }
+            if(CONFIRM == 1)
+            {
+                __delay_ms(50);
+                if(CONFIRM == 1)
+                {
+                    while(CONFIRM == 1);
+                    LCD_CMD(0x01);
+                    if(count == 0) 
+                    {
+                        ADD_FINGER();
+                    }
+                    else if(count == 1) 
+                    {
+                        delete_Fingerprint();
+                    }
+                    else if(count == 2) 
+                    {
+                        unsigned char iscorrect=0;
+                        iscorrect=AskFromUser();
+                        if(iscorrect!=1){
+                        isactive = 0;
+                        last_count = 255;
+                        continue;}
+                        
+                        DOOR=1;
+                        LCD_CMD(0x01);
+                        sendString("DOOR OPENED");
+                
+                BUZZER=1;
+                __delay_ms(250);
+                BUZZER=0;
+                __delay_ms(100);
+                BUZZER=1;
+                __delay_ms(100);
+                BUZZER=0;
+                __delay_ms(100);
+                BUZZER=1;
+                
+                        isactive = 0;
+                        last_count = 255;
+                        __delay_ms(50000);
+                        DOOR = 0;
+                        continue;
+                    }
+                    else if(count == 3) 
+                    {
+                        GetFromUser();
+                        
+                    }
+                    else if(count == 4) 
+                    {
+                        LCD_CMD(0x01);
+                        sendString("EXITING MENU");
+                        __delay_ms(1000);
+                        isactive = 0;   
+                        last_count = 255;
+                        continue;
+                    }
+                    last_count = 255;
+                }
+            }
+        }
+    }
+  }
+
+}
