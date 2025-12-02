@@ -1,0 +1,24 @@
+#ifndef UART_Communication_H
+#define UART_Communication_H
+void UART_Init(){
+    SPBRG = 129;  // Updated for 20MHz crystal (9600 baud)
+    BRGH = 1;
+    SYNC=0;
+    SPEN=1;
+    TXEN=1;
+    CREN=1;
+}
+void UART_SEND(char arr){
+    while(!TXIF);
+    TXREG=arr;
+}
+void SEND_TX(const char *arr,int size){
+    for(int i = 0;i<size;i++){
+        UART_SEND(arr[i]);
+    }
+}
+unsigned char UART_READ(){
+    while(!RCIF);
+    return RCREG;
+}
+#endif
