@@ -1,0 +1,60 @@
+#ifndef DELETE_FINGER_H
+#define DELETE_FINGER_H
+
+#define CONFIRM RB3
+
+extern unsigned char DRP[12];
+extern unsigned char current_ID;
+
+void delete_Fingerprint() {
+    unsigned char id;
+    unsigned char sum;
+
+    LCD_CMD(0x01);
+    sendString("SCAN TO DELETE");
+    __delay_ms(1500);
+
+    id = SEARCH_FINGER();
+    
+
+    if (id == 0) {
+        return;
+    }
+    
+
+    if (id > 9) {
+        LCD_CMD(0x01);
+        sendString("INVALID ID");
+        __delay_ms(2000);
+        return;
+    }
+    LCD_CMD(0x01);
+    sendString("DELETING");
+    __delay_ms(500);
+    
+    unsigned char Delete[16] = {0xEF,0x01,0xFF,0xFF,0xFF,0xFF,0x01,0x00,0x07,0x0C,0x00,0x00,0x00,0x01,0x00,0x00};
+    
+    Delete[11] = id;
+    sum = 0x15 + id;
+    Delete[15] = sum;
+   
+    SEND_TX(Delete, 16);
+    for (int i = 0; i < 12; i++) {
+        DRP[i] = UART_READ();
+    }
+    LCD_CMD(0x01);
+    
+    if (DRP[9] == 0x00) {
+        sendString("DELETED!");
+        if (current_ID > 0) {
+            current_ID--;
+        }
+    } 
+    else {
+        sendString("DELETE FAILED");
+    }
+    
+    __delay_ms(2000);
+}
+
+#endif
