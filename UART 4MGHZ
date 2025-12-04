@@ -1,7 +1,7 @@
 #ifndef UART_Communication_H
 #define UART_Communication_H
 void UART_Init(){
-    SPBRG = 129;  // Updated for 20MHz crystal (9600 baud)
+    SPBRG = 25;
     BRGH = 1;
     SYNC=0;
     SPEN=1;
