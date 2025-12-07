@@ -1,118 +1,150 @@
+#ifndef SERVO_H
+#define SERVO_H
+
 #include <xc.h>
 
-// -----------------------------------------
-// 1. Crystal Frequency: 4 MHz
-// -----------------------------------------
-#define _XTAL_FREQ 4000000UL   
+#define _XTAL_FREQ 4000000UL
+#define DOOR RB5
 
-// -----------------------------------------
-// 2. CONFIG: FOSC = XT for 4 MHz
-// -----------------------------------------
-#pragma config FOSC = XT
-#pragma config WDTE = OFF
-#pragma config PWRTE = ON
-#pragma config BOREN = ON
-#pragma config LVP = OFF
-#pragma config CPD = OFF
-#pragma config WRT = OFF
-#pragma config CP = OFF
-
-// Pin Definitions
-#define SERVO_PIN  PORTCbits.RC2
-#define SERVO_TRIS TRISCbits.TRISC2
-
-// -----------------------------------------
-// Custom delay helper (for 4MHz precision)
-// -----------------------------------------
-void delay_us_custom(unsigned int us)
+void delay_us_variable(unsigned int us)
 {
-    while(us >= 10)
-    {
-        __delay_us(10);
-        us -= 10;
-    }
     while(us > 0)
     {
-        __delay_us(1);
+        __asm("NOP");
+        __asm("NOP");
         us--;
     }
 }
 
-// -----------------------------------------
-// Generates a SINGLE 20ms frame
-// -----------------------------------------
-void generate_pulse(unsigned int angle)
+void servo_pulse(unsigned char angle)
 {
     unsigned int pulse_width;
-    
-    // Calculate pulse (500us to 2500us)
-    pulse_width = 500 + (angle * 2000UL) / 180UL;
-
-    SERVO_PIN = 1;          // Pin HIGH
-    delay_us_custom(pulse_width);
-
-    SERVO_PIN = 0;          // Pin LOW
-    // Complete the 20ms (20000us) frame
-    delay_us_custom(20000 - pulse_width);
-}
-
-// -----------------------------------------
-// Helper: Holds the servo in place for 3 Seconds
-// -----------------------------------------
-void hold_for_3_seconds(unsigned int angle)
-{
-    // A standard servo frame is 20ms.
-    // 3000ms / 20ms = 150 frames.
-    // We must keep sending pulses so the servo has torque.
-    
-    int frames = 150; 
-    while(frames > 0)
+    unsigned int remaining_us;
+    unsigned char ms_delay;
+   
+    if(angle > 180) angle = 180;
+   
+    pulse_width = 1000 + (((unsigned int)angle * 111) / 20);
+   
+    if(pulse_width < 1000) pulse_width = 1000;
+    if(pulse_width > 2000) pulse_width = 2000;
+   
+    DOOR = 1;
+   
+    if(pulse_width >= 1000)
     {
-        generate_pulse(angle);
-        frames--;
+        __delay_us(500);
+        __delay_us(500);
+       
+        remaining_us = pulse_width - 1000;
+        if(remaining_us > 0)
+        {
+            delay_us_variable(remaining_us);
+        }
+    }
+   
+    DOOR = 0;
+   
+    remaining_us = 20000 - pulse_width;
+    ms_delay = remaining_us / 1000;
+    remaining_us = remaining_us % 1000;
+   
+    while(ms_delay > 0)
+    {
+        __delay_ms(1);
+        ms_delay--;
+    }
+   
+    if(remaining_us > 0)
+    {
+        delay_us_variable(remaining_us);
     }
 }
 
-// -----------------------------------------
-// MAIN LOGIC
-// -----------------------------------------
-void Start_Servo_Sweep(void)
+void servo_set_angle(unsigned char angle)
 {
-    // Configure Pin
-    SERVO_TRIS = 0; // Output
-    SERVO_PIN = 0;  // Low
-
-    unsigned int angle = 0;
-    int step = 1;
-
-    while(1)
+    for(unsigned char i = 0; i < 30; i++)
     {
-        // 1. Send the movement pulse
-        generate_pulse(angle);
-
-        // 2. Check if we reached a limit
-        if(angle == 180)
-        {
-            // Reached 180 -> HOLD for 3 sec
-            hold_for_3_seconds(180);
-            step = -1; // Switch direction down
-        }
-        else if(angle == 0)
-        {
-            // Reached 0 -> HOLD for 3 sec
-            hold_for_3_seconds(0);
-            step = 1;  // Switch direction up
-        }
-
-        // 3. Move to next angle
-        angle += step;
+        servo_pulse(angle);
+        CLRWDT();
     }
 }
 
-// -----------------------------------------
-// Main
-// -----------------------------------------
-void main(void)
+void servo_rotate_smooth(unsigned char start_angle, unsigned char end_angle, unsigned char step_delay_ms)
 {
-    Start_Servo_Sweep();
+    unsigned char angle;
+    unsigned char delay_count;
+   
+    if(start_angle < end_angle)
+    {
+        for(angle = start_angle; angle <= end_angle; angle += 5)
+        {
+            servo_pulse(angle);
+           
+            for(delay_count = 0; delay_count < step_delay_ms; delay_count++)
+            {
+                __delay_ms(1);
+            }
+            CLRWDT();
+        }
+    }
+    else
+    {
+        for(angle = start_angle; angle >= end_angle; angle -= 5)
+        {
+            servo_pulse(angle);
+           
+            for(delay_count = 0; delay_count < step_delay_ms; delay_count++)
+            {
+                __delay_ms(1);
+            }
+            CLRWDT();
+           
+            if(angle < 5) break;
+        }
+    }
+   
+    servo_set_angle(end_angle);
 }
+
+void open_door(void)
+{
+    LCD_CMD(0x01);
+    sendString("OPENING DOOR...");
+    __delay_ms(500);
+   
+    servo_rotate_smooth(0, 180, 20);
+    CLRWDT();
+   
+    LCD_CMD(0x01);
+    sendString("DOOR OPEN");
+    LCD_CMD(0xC0);
+    sendString("CLOSING IN 5 SEC");
+   
+    for(unsigned char i = 0; i < 5; i++)
+    {
+        __delay_ms(1000);
+        CLRWDT();
+    }
+   
+    LCD_CMD(0x01);
+    sendString("CLOSING DOOR...");
+    __delay_ms(500);
+   
+    servo_rotate_smooth(180, 0, 20);
+    CLRWDT();
+   
+    DOOR = 0;
+   
+    LCD_CMD(0x01);
+    sendString("DOOR CLOSED");
+    __delay_ms(1000);
+}
+
+void close_door_fast(void)
+{
+    servo_set_angle(0);
+    DOOR = 0;
+}
+
+#endif
