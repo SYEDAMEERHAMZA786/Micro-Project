@@ -1,0 +1,778 @@
+// ============================================================================
+// FINGERPRINT SECURITY SYSTEM - PIC16F877A + R307 + SG90
+// FIXED: SMOOTH MOVEMENT (2-degree steps + Precision Timing)
+// ============================================================================
+
+#define _XTAL_FREQ 4000000 // 4 MHz Crystal
+
+#include <xc.h>
+#include <stdint.h>
+#include <string.h>
+
+#pragma config FOSC = XT
+#pragma config WDTE = OFF
+#pragma config PWRTE = ON
+#pragma config BOREN = ON
+#pragma config LVP = OFF
+#pragma config CPD = OFF
+#pragma config WRT = OFF
+#pragma config CP = OFF
+
+// Pin Definitions
+#define LCD_RS RC0
+#define LCD_EN RC1
+#define LCD_DATA PORTD
+#define BTN_MENU PORTBbits.RB6
+#define BTN_UP PORTBbits.RB2
+#define BTN_DOWN PORTBbits.RB1
+#define BTN_CONFIRM PORTBbits.RB3
+#define BUZZER PORTBbits.RB7
+#define PASS_BTN1 PORTAbits.RA3
+#define PASS_BTN2 PORTAbits.RA2
+#define PASS_BTN3 PORTAbits.RA1
+#define PASS_BTN4 PORTAbits.RA0
+
+// Servo Definitions
+#define SERVO_PIN RC2
+#define SERVO_TRIS TRISCbits.TRISC2
+
+// Global Variables
+#define PASSWORD_LENGTH 4
+uint8_t current_password[PASSWORD_LENGTH] = {1, 2, 3, 4};
+uint8_t menu_index = 0;
+uint8_t system_state = 0;
+uint8_t fingerprint_count = 0;
+
+const char* menu_items[5] = {
+    "1.Verify Finger",
+    "2.Add Finger   ",
+    "3.Delete Finger",
+    "4.Password Open",
+    "5.Change Pass  "
+};
+
+// Function Prototypes
+void LCD_Command(uint8_t cmd);
+void LCD_Char(char data);
+void LCD_Init(void);
+void LCD_Clear(void);
+void LCD_SetCursor(uint8_t row, uint8_t col);
+void LCD_String(const char* str);
+void LCD_Number(uint16_t num);
+void Buzzer_Beep(uint8_t count);
+void Buzzer_Tone(uint16_t ms);
+void Servo_Init(void);
+void generate_pulse(unsigned int angle);
+void Servo_Open(void);
+
+// R307 and System Prototypes
+void UART_Init(void);
+void UART_Write(uint8_t data);
+uint8_t UART_Read(void);
+uint8_t UART_Available(void);
+void UART_Flush(void);
+void R307_SendPacket(uint8_t cmd, uint8_t* params, uint8_t param_len);
+uint8_t R307_ReceivePacket(uint8_t* response, uint16_t timeout);
+uint8_t R307_GetImage(void);
+uint8_t R307_Image2Tz(uint8_t slot);
+uint8_t R307_CreateModel(void);
+uint8_t R307_StoreModel(uint8_t slot, uint16_t id);
+uint8_t R307_Search(uint8_t slot, uint16_t* id, uint16_t* score);
+uint8_t R307_DeleteModel(uint16_t id, uint16_t count);
+uint8_t R307_GetTemplateCount(uint16_t* count);
+
+// Buttons
+uint8_t Button_Read_Menu(void);
+uint8_t Button_Read_Up(void);
+uint8_t Button_Read_Down(void);
+uint8_t Button_Read_Confirm(void);
+uint8_t Button_Read_Pass1(void);
+uint8_t Button_Read_Pass2(void);
+uint8_t Button_Read_Pass3(void);
+uint8_t Button_Read_Pass4(void);
+
+// Actions
+void Verify_Fingerprint(void);
+void Add_Fingerprint(void);
+void Delete_Fingerprint(void);
+void Password_Open(void);
+void Change_Password(void);
+void Display_Idle(void);
+void Display_Menu(void);
+uint8_t Get_Password_Input(void);
+
+// ============================================================================
+// LCD FUNCTIONS
+// ============================================================================
+void LCD_Command(uint8_t cmd) {
+    LCD_RS = 0;
+    LCD_DATA = cmd;
+    LCD_EN = 1;
+    __delay_us(50);
+    LCD_EN = 0;
+    __delay_ms(2);
+}
+
+void LCD_Char(char data) {
+    LCD_RS = 1;
+    LCD_DATA = data;
+    LCD_EN = 1;
+    __delay_us(50);
+    LCD_EN = 0;
+    __delay_us(100);
+}
+
+void LCD_Init(void) {
+    __delay_ms(20);
+    LCD_RS = 0;
+    LCD_DATA = 0x30;
+    LCD_EN = 1; __delay_us(50); LCD_EN = 0;
+    __delay_ms(5);
+
+    LCD_EN = 1; __delay_us(50); LCD_EN = 0;
+    __delay_us(200);
+
+    LCD_EN = 1; __delay_us(50); LCD_EN = 0;
+    __delay_ms(1);
+
+    LCD_Command(0x38);
+    LCD_Command(0x0C);
+    LCD_Command(0x06);
+    LCD_Command(0x01);
+    __delay_ms(5);
+}
+
+void LCD_Clear(void) {
+    LCD_Command(0x01);
+    __delay_ms(2);
+}
+
+void LCD_SetCursor(uint8_t row, uint8_t col) {
+    if (row == 0) {
+        LCD_Command(0x80 + col);
+    } else {
+        LCD_Command(0xC0 + col);
+    }
+}
+
+void LCD_String(const char* str) {
+    while (*str) {
+        LCD_Char(*str++);
+    }
+}
+
+void LCD_Number(uint16_t num) {
+    char buffer[6];
+    uint8_t i = 0;
+    if (num == 0) {
+        LCD_Char('0');
+        return;
+    }
+    while (num > 0) {
+        buffer[i++] = (num % 10) + '0';
+        num /= 10;
+    }
+    while (i > 0) {
+        LCD_Char(buffer[--i]);
+    }
+}
+
+// ============================================================================
+// BUZZER FUNCTIONS
+// ============================================================================
+void Buzzer_Tone(uint16_t ms) {
+    uint16_t cycles = ms;
+    while (cycles--) {
+        BUZZER = 1;
+        __delay_us(500);
+        BUZZER = 0;
+        __delay_us(500);
+    }
+}
+
+void Buzzer_Beep(uint8_t count) {
+    uint8_t i;
+    for (i = 0; i < count; i++) {
+        Buzzer_Tone(100);
+        __delay_ms(50);
+    }
+}
+
+void Buzzer_Success(void) {
+    Buzzer_Tone(200);
+}
+
+void Buzzer_Error(void) {
+    Buzzer_Tone(50);
+    __delay_ms(50);
+    Buzzer_Tone(50);
+    __delay_ms(50);
+    Buzzer_Tone(50);
+}
+
+// ============================================================================
+// SERVO FUNCTIONS
+// ============================================================================
+void Servo_Init(void) {
+    SERVO_TRIS = 0;
+    SERVO_PIN = 0;
+}
+
+// FIXED: Smooth, Linear Timing
+// Uses direct loop iterations to avoid calculation lag during pulse
+void generate_pulse(unsigned int angle) {
+    // Tuning for 4MHz:
+    // 0 deg   = 50 loops (~600us)
+    // 180 deg = 230 loops (~2400us)
+    unsigned int loops = 50 + angle; 
+    unsigned int off_time_us;
+    
+    // Start Pulse
+    SERVO_PIN = 1;
+    
+    // Efficient delay loop
+    // __delay_us(5) + loop overhead (~5us) = ~10us per step
+    while(loops--) {
+        __delay_us(5); 
+    }
+    
+    // End Pulse
+    SERVO_PIN = 0;
+    
+    // Calculate remaining time to maintain 50Hz (20ms total)
+    // Approximate: Total 20ms - (loops * 10us)
+    // Since math is heavy, we use a fixed safe delay that covers most servo needs
+    __delay_ms(18); 
+}
+
+void Servo_Open(void) {
+    unsigned int angle;
+    uint8_t repeat;
+
+    LCD_Clear();
+    LCD_SetCursor(0, 0);
+    LCD_String("Opening...");
+
+    // Sweep UP (0 to 180) - 2 Degree Steps for SMOOTHNESS
+    for (angle = 0; angle <= 180; angle += 2) {
+         generate_pulse(angle); // One pulse per step = ~1.8 sec total time
+    }
+    
+    // Hold 180 (Force it to stay at the end for 1.5s)
+    for (repeat = 0; repeat < 75; repeat++) {
+        generate_pulse(180);
+    }
+
+    LCD_SetCursor(1, 0);
+    LCD_String("Access Granted!");
+
+    // Sweep DOWN (180 to 0) - 2 Degree Steps for SMOOTHNESS
+    LCD_SetCursor(1, 0);
+    LCD_String("Closing...      ");
+    for (angle = 180; angle >= 2; angle -= 2) {
+         generate_pulse(angle);
+    }
+    generate_pulse(0); // Ensure 0
+    
+    // Lock 0 (Force it to stay at start for 1.5s)
+    for (repeat = 0; repeat < 75; repeat++) {
+        generate_pulse(0);
+    }
+
+    LCD_Clear();
+    LCD_SetCursor(0, 0);
+    LCD_String("Door Closed!");
+    __delay_ms(500);
+}
+
+// ============================================================================
+// BUTTONS
+// ============================================================================
+uint8_t Button_Read_Menu(void) { if(BTN_MENU) { __delay_ms(50); if(BTN_MENU) { while(BTN_MENU){}; return 1; }} return 0; }
+uint8_t Button_Read_Up(void) { if(BTN_UP) { __delay_ms(50); if(BTN_UP) { while(BTN_UP){}; return 1; }} return 0; }
+uint8_t Button_Read_Down(void) { if(BTN_DOWN) { __delay_ms(50); if(BTN_DOWN) { while(BTN_DOWN){}; return 1; }} return 0; }
+uint8_t Button_Read_Confirm(void) { if(BTN_CONFIRM) { __delay_ms(50); if(BTN_CONFIRM) { while(BTN_CONFIRM){}; return 1; }} return 0; }
+uint8_t Button_Read_Pass1(void) { if(PASS_BTN1) { __delay_ms(50); if(PASS_BTN1) { while(PASS_BTN1){}; return 1; }} return 0; }
+uint8_t Button_Read_Pass2(void) { if(PASS_BTN2) { __delay_ms(50); if(PASS_BTN2) { while(PASS_BTN2){}; return 1; }} return 0; }
+uint8_t Button_Read_Pass3(void) { if(PASS_BTN3) { __delay_ms(50); if(PASS_BTN3) { while(PASS_BTN3){}; return 1; }} return 0; }
+uint8_t Button_Read_Pass4(void) { if(PASS_BTN4) { __delay_ms(50); if(PASS_BTN4) { while(PASS_BTN4){}; return 1; }} return 0; }
+
+// ============================================================================
+// UART & R307
+// ============================================================================
+void UART_Init(void) {
+    TRISCbits.TRISC6 = 0;
+    TRISCbits.TRISC7 = 1;
+    SPBRG = 25;
+    TXSTA = 0x24;
+    RCSTA = 0x90;
+}
+
+void UART_Write(uint8_t data) {
+    while (!TXIF) {};
+    TXREG = data;
+}
+
+uint8_t UART_Read(void) {
+    while (!RCIF) {};
+    return RCREG;
+}
+
+uint8_t UART_Available(void) {
+    return RCIF;
+}
+
+void UART_Flush(void) {
+    while (UART_Available()) {
+        UART_Read();
+    }
+}
+
+uint16_t R307_CalcSum(uint8_t* p, uint8_t len) {
+    uint16_t s = 0;
+    for (uint8_t i = 6; i < len - 2; i++) {
+        s += p[i];
+    }
+    return s;
+}
+
+void R307_SendPacket(uint8_t cmd, uint8_t* params, uint8_t param_len) {
+    uint8_t pkt[32];
+    uint8_t idx = 0;
+    uint16_t sum;
+    uint8_t i;
+
+    pkt[idx++] = 0xEF;
+    pkt[idx++] = 0x01;
+    pkt[idx++] = 0xFF;
+    pkt[idx++] = 0xFF;
+    pkt[idx++] = 0xFF;
+    pkt[idx++] = 0xFF;
+    pkt[idx++] = 0x01;
+    pkt[idx++] = (param_len + 3) >> 8;
+    pkt[idx++] = (param_len + 3) & 0xFF;
+    pkt[idx++] = cmd;
+
+    for (i = 0; i < param_len; i++) {
+        pkt[idx++] = params[i];
+    }
+
+    sum = R307_CalcSum(pkt, idx + 2);
+    pkt[idx++] = sum >> 8;
+    pkt[idx++] = sum & 0xFF;
+
+    for (i = 0; i < idx; i++) {
+        UART_Write(pkt[i]);
+    }
+}
+
+uint8_t R307_ReceivePacket(uint8_t* r, uint16_t t) {
+    uint16_t c = 0;
+    uint8_t idx = 0;
+    while (c < t) {
+        if (UART_Available()) {
+            uint8_t b = UART_Read();
+            if (idx == 0 && b == 0xEF) {
+                r[idx++] = b;
+            } else if (idx == 1 && b == 0x01) {
+                r[idx++] = b;
+                break;
+            } else {
+                idx = 0;
+            }
+        }
+        __delay_ms(1);
+        c++;
+    }
+    if (idx < 2) return 0;
+
+    for (uint8_t i = 0; i < 11; i++) {
+        c = 0;
+        while (!UART_Available() && c < 100) {
+            __delay_ms(1);
+            c++;
+        }
+        if (c >= 100) return 0;
+        r[idx++] = UART_Read();
+    }
+    return idx;
+}
+
+uint8_t R307_GetImage(void) {
+    uint8_t r[32];
+    UART_Flush();
+    R307_SendPacket(0x01, 0, 0);
+    return (R307_ReceivePacket(r, 1000)) ? r[9] : 0xFF;
+}
+
+uint8_t R307_Image2Tz(uint8_t s) {
+    uint8_t p[] = {s};
+    uint8_t r[32];
+    R307_SendPacket(0x02, p, 1);
+    return (R307_ReceivePacket(r, 2000)) ? r[9] : 0xFF;
+}
+
+uint8_t R307_CreateModel(void) {
+    uint8_t r[32];
+    R307_SendPacket(0x05, 0, 0);
+    return (R307_ReceivePacket(r, 2000)) ? r[9] : 0xFF;
+}
+
+uint8_t R307_StoreModel(uint8_t s, uint16_t id) {
+    uint8_t p[] = {s, id >> 8, id & 0xFF};
+    uint8_t r[32];
+    R307_SendPacket(0x06, p, 3);
+    return (R307_ReceivePacket(r, 2000)) ? r[9] : 0xFF;
+}
+
+uint8_t R307_Search(uint8_t s, uint16_t* id, uint16_t* sc) {
+    uint8_t p[] = {s, 0, 0, 0, 200};
+    uint8_t r[32];
+    R307_SendPacket(0x04, p, 5);
+    if (R307_ReceivePacket(r, 2000) && r[9] == 0) {
+        *id = (uint16_t)((r[10] << 8) | r[11]);
+        *sc = (uint16_t)((r[12] << 8) | r[13]);
+        return 0;
+    }
+    return r[9];
+}
+
+uint8_t R307_DeleteModel(uint16_t id, uint16_t n) {
+    uint8_t p[] = {id >> 8, id & 0xFF, n >> 8, n & 0xFF};
+    uint8_t r[32];
+    R307_SendPacket(0x0C, p, 4);
+    return (R307_ReceivePacket(r, 2000)) ? r[9] : 0xFF;
+}
+
+uint8_t R307_GetTemplateCount(uint16_t* c) {
+    uint8_t r[32];
+    R307_SendPacket(0x1D, 0, 0);
+    if (R307_ReceivePacket(r, 2000) && r[9] == 0) {
+        *c = (uint16_t)((r[10] << 8) | r[11]);
+        return 0;
+    }
+    return 0xFF;
+}
+
+// ============================================================================
+// LOGIC
+// ============================================================================
+void Display_Idle(void) {
+    LCD_Clear();
+    LCD_SetCursor(0, 0);
+    LCD_String("There's Always");
+    LCD_SetCursor(1, 0);
+    LCD_String("Big Fish In Pond");
+}
+
+void Display_Menu(void) {
+    LCD_Clear();
+    LCD_SetCursor(0, 0);
+    LCD_String(menu_items[menu_index]);
+    LCD_SetCursor(1, 0);
+    LCD_String("UP/DN SEL=CONF");
+}
+
+uint8_t Get_Password_Input(void) {
+    uint8_t inp[4];
+    uint8_t idx = 0;
+    LCD_Clear();
+    LCD_SetCursor(0, 0);
+    LCD_String("Enter Password:");
+    LCD_SetCursor(1, 0);
+    while (idx < 4) {
+        if (Button_Read_Pass1()) {
+            inp[idx++] = 1;
+            LCD_Char('*');
+            Buzzer_Beep(1);
+        } else if (Button_Read_Pass2()) {
+            inp[idx++] = 2;
+            LCD_Char('*');
+            Buzzer_Beep(1);
+        } else if (Button_Read_Pass3()) {
+            inp[idx++] = 3;
+            LCD_Char('*');
+            Buzzer_Beep(1);
+        } else if (Button_Read_Pass4()) {
+            inp[idx++] = 4;
+            LCD_Char('*');
+            Buzzer_Beep(1);
+        }
+    }
+    for (uint8_t i = 0; i < 4; i++) {
+        if (inp[i] != current_password[i]) return 0;
+    }
+    return 1;
+}
+
+void Verify_Fingerprint(void) {
+    uint16_t id, sc;
+    LCD_Clear();
+    LCD_SetCursor(0, 0);
+    LCD_String("Place Finger...");
+
+    if (R307_GetImage() != 0) {
+        LCD_SetCursor(1, 0);
+        LCD_String("No Finger!");
+        Buzzer_Error();
+        __delay_ms(2000);
+        return;
+    }
+    if (R307_Image2Tz(1) != 0) {
+        LCD_SetCursor(1, 0);
+        LCD_String("Error!");
+        Buzzer_Error();
+        __delay_ms(2000);
+        return;
+    }
+    if (R307_Search(1, &id, &sc) == 0) {
+        LCD_SetCursor(1, 0);
+        LCD_String("Match! ID:");
+        LCD_Number(id);
+        Buzzer_Success();
+        __delay_ms(1000);
+        Servo_Open();
+    } else {
+        LCD_SetCursor(1, 0);
+        LCD_String("No Match!");
+        Buzzer_Error();
+        __delay_ms(2000);
+    }
+}
+
+void Add_Fingerprint(void) {
+    uint16_t c, new_id;
+    R307_GetTemplateCount(&c);
+    new_id = c + 1;
+
+    LCD_Clear();
+    LCD_SetCursor(0, 0);
+    LCD_String("Place Finger...");
+    while (R307_GetImage() != 0) {
+        __delay_ms(100);
+    }
+
+    if (R307_Image2Tz(1) != 0) {
+        Buzzer_Error();
+        return;
+    }
+
+    LCD_SetCursor(1, 0);
+    LCD_String("Remove Finger");
+    Buzzer_Beep(1);
+    __delay_ms(2000);
+
+    LCD_SetCursor(1, 0);
+    LCD_String("Place Again...  ");
+    while (R307_GetImage() != 0) {
+        __delay_ms(100);
+    }
+
+    if (R307_Image2Tz(2) != 0) {
+        Buzzer_Error();
+        return;
+    }
+
+    if (R307_CreateModel() != 0) {
+        LCD_SetCursor(1, 0);
+        LCD_String("Mismatch!");
+        Buzzer_Error();
+        __delay_ms(2000);
+        return;
+    }
+
+    if (R307_StoreModel(1, new_id) == 0) {
+        LCD_Clear();
+        LCD_SetCursor(0, 0);
+        LCD_String("Saved ID:");
+        LCD_Number(new_id);
+        Buzzer_Success();
+        fingerprint_count++;
+        __delay_ms(2000);
+    } else {
+        Buzzer_Error();
+    }
+}
+
+void Delete_Fingerprint(void) {
+    uint16_t c, id, sc;
+    if (R307_GetTemplateCount(&c) != 0 || c == 0) {
+        LCD_Clear();
+        LCD_String("Empty!");
+        Buzzer_Error();
+        __delay_ms(2000);
+        return;
+    }
+
+    LCD_Clear();
+    LCD_String("Verify to Del");
+    __delay_ms(1000);
+    LCD_Clear();
+    LCD_String("Place Finger...");
+
+    if (R307_GetImage() != 0) return;
+    R307_Image2Tz(1);
+
+    if (R307_Search(1, &id, &sc) == 0) {
+        if (R307_DeleteModel(id, 1) == 0) {
+            LCD_Clear();
+            LCD_String("Deleted ID:");
+            LCD_Number(id);
+            Buzzer_Success();
+            fingerprint_count--;
+            __delay_ms(2000);
+        } else {
+            Buzzer_Error();
+        }
+    } else {
+        LCD_SetCursor(1, 0);
+        LCD_String("Not Found!");
+        Buzzer_Error();
+        __delay_ms(2000);
+    }
+}
+
+void Password_Open(void) {
+    if (Get_Password_Input()) {
+        LCD_Clear();
+        LCD_String("Pass OK!");
+        Buzzer_Success();
+        __delay_ms(1000);
+        Servo_Open();
+    } else {
+        LCD_Clear();
+        LCD_String("Wrong Pass!");
+        Buzzer_Error();
+        __delay_ms(2000);
+    }
+}
+
+void Change_Password(void) {
+    LCD_Clear();
+    LCD_String("Verify Current:");
+    __delay_ms(1000);
+
+    if (!Get_Password_Input()) {
+        LCD_Clear();
+        LCD_String("Wrong!");
+        Buzzer_Error();
+        __delay_ms(2000);
+        return;
+    }
+
+    LCD_Clear();
+    LCD_String("Enter New Pass:");
+    uint8_t idx = 0;
+    while (idx < 4) {
+        if (Button_Read_Pass1()) {
+            current_password[idx++] = 1;
+            LCD_Char('*');
+            Buzzer_Beep(1);
+        } else if (Button_Read_Pass2()) {
+            current_password[idx++] = 2;
+            LCD_Char('*');
+            Buzzer_Beep(1);
+        } else if (Button_Read_Pass3()) {
+            current_password[idx++] = 3;
+            LCD_Char('*');
+            Buzzer_Beep(1);
+        } else if (Button_Read_Pass4()) {
+            current_password[idx++] = 4;
+            LCD_Char('*');
+            Buzzer_Beep(1);
+        }
+    }
+    LCD_Clear();
+    LCD_String("Saved!");
+    Buzzer_Success();
+    __delay_ms(2000);
+}
+
+void main(void) {
+    TRISB = 0x4F;  
+
+    TRISA = 0x0F;
+    TRISC = 0x80;
+    TRISD = 0x00;
+    
+    PORTA = 0;
+    PORTB = 0;
+    PORTC = 0;
+    PORTD = 0;
+    
+    TRISE = 0x00; 
+    
+    ADCON1 = 0x06;
+
+    LCD_Init();
+    UART_Init();
+    Servo_Init();
+
+    LCD_Clear();
+    LCD_String("Fingerprint Sec");
+    LCD_SetCursor(1, 0);
+    LCD_String("System v2.0");
+    Buzzer_Beep(2);
+    __delay_ms(2000);
+
+    // Initial Move to 0 (Lock)
+    uint8_t i;
+    for (i = 0; i < 50; i++) {
+        generate_pulse(0);
+    }
+
+    uint16_t t;
+    if (R307_GetTemplateCount(&t) == 0) {
+        fingerprint_count = (uint8_t)t;
+    }
+    Display_Idle();
+
+    while (1) {
+        if (system_state == 0) {
+            if (Button_Read_Menu()) {
+                system_state = 1;
+                menu_index = 0;
+                Display_Menu();
+                Buzzer_Beep(1);
+            }
+            __delay_ms(50);
+        } else if (system_state == 1) {
+            if (Button_Read_Up()) {
+                menu_index = (menu_index > 0) ? menu_index - 1 : 4;
+                Display_Menu();
+                Buzzer_Beep(1);
+            } else if (Button_Read_Down()) {
+                menu_index = (menu_index < 4) ? menu_index + 1 : 0;
+                Display_Menu();
+                Buzzer_Beep(1);
+            } else if (Button_Read_Confirm()) {
+                system_state = 2;
+                Buzzer_Beep(1);
+                switch (menu_index) {
+                    case 0:
+                        Verify_Fingerprint();
+                        break;
+                    case 1:
+                        Add_Fingerprint();
+                        break;
+                    case 2:
+                        Delete_Fingerprint();
+                        break;
+                    case 3:
+                        Password_Open();
+                        break;
+                    case 4:
+                        Change_Password();
+                        break;
+                }
+                system_state = 0;
+                Display_Idle();
+            } else if (Button_Read_Menu()) {
+                system_state = 0;
+                Display_Idle();
+                Buzzer_Beep(1);
+            }
+            __delay_ms(50);
+        }
+    }
+}
