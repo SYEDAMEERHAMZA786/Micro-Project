@@ -1,0 +1,766 @@
+#include <HardwareSerial.h>
+
+// R307 Communication Protocol
+#define HEADER_START 0xEF01
+#define ADDR_DEFAULT 0xFFFFFFFF
+
+// Packet IDs
+#define PID_COMMAND 0x01
+#define PID_DATA 0x02
+#define PID_ACK 0x07
+#define PID_END_DATA 0x08
+
+// Commands
+#define CMD_GEN_IMG 0x01
+#define CMD_IMG_2_TZ 0x02
+#define CMD_MATCH 0x03
+#define CMD_SEARCH 0x04
+#define CMD_REG_MODEL 0x05
+#define CMD_STORE 0x06
+#define CMD_LOAD 0x07
+#define CMD_DELETE 0x0C
+#define CMD_EMPTY 0x0D
+#define CMD_VERIFY_PASSWORD 0x13
+#define CMD_LED_CONFIG 0x35
+#define CMD_READ_SYS_PARA 0x0F
+
+// Confirmation codes
+#define ACK_SUCCESS 0x00
+#define ACK_ERROR 0x01
+#define ACK_NO_FINGER 0x02
+#define ACK_IMG_FAIL 0x03
+#define ACK_IMG_MESS 0x06
+#define ACK_FEATURE_FAIL 0x07
+#define ACK_NO_MATCH 0x08
+#define ACK_NOT_FOUND 0x09
+#define ACK_ENROLL_MISMATCH 0x0A
+#define ACK_BAD_LOCATION 0x0B
+#define ACK_INVALID_REG 0x1A
+
+// Buffer IDs
+#define CHAR_BUFFER_1 0x01
+#define CHAR_BUFFER_2 0x02
+
+// ESP32 pins for Serial2
+#define RXD2 16
+#define TXD2 17
+
+HardwareSerial FPSerial(2);
+
+uint8_t rxBuffer[128];  // Increased buffer size
+int rxIndex = 0;
+
+void setup() {
+  Serial.begin(115200);
+  FPSerial.begin(57600, SERIAL_8N1, RXD2, TXD2);
+ 
+  delay(1000);
+  
+  // Clear any leftover data in serial buffers
+  while(FPSerial.available()) FPSerial.read();
+  while(Serial.available()) Serial.read();
+  
+  Serial.println("\n=== R307 Fingerprint System ===");
+  Serial.println("Commands:");
+  Serial.println("E<id> - Enroll fingerprint (e.g., E1)");
+  Serial.println("S - Search fingerprint");
+  Serial.println("V<id> - Verify fingerprint (e.g., V1)");
+  Serial.println("D<id> - Delete fingerprint (e.g., D1)");
+  Serial.println("DA - Delete all fingerprints");
+  Serial.println("C - Get fingerprint count");
+  Serial.println("R - Read system parameters");
+  Serial.println("CLEAR - Clear all fingerprints (same as DA)");
+  Serial.println("TEST - Test flash write capability");
+  Serial.println("RESET - Factory reset the sensor");
+  Serial.println("UNLOCK - Try to unlock flash memory");
+  Serial.println("================================\n");
+ 
+  // Verify connection
+  delay(500);
+  if (verifyPassword()) {
+    Serial.println("✓ R307 sensor connected!");
+    controlLED(true, true, 5); // Purple LED for 5 cycles
+  } else {
+    Serial.println("✗ R307 sensor not found!");
+  }
+}
+
+void loop() {
+  // Handle serial input from user
+  if (Serial.available()) {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+    if (cmd.length() > 0) {
+      processCommand(cmd);
+    }
+  }
+}
+
+void processCommand(String cmd) {
+  cmd.toUpperCase();
+ 
+  if (cmd.startsWith("E")) {
+    int id = cmd.substring(1).toInt();
+    if (id >= 1 && id <= 255) {
+      enrollFingerprint(id);
+    } else {
+      Serial.println("Error: ID must be 1-255");
+    }
+  }
+  else if (cmd == "S") {
+    searchFingerprint();
+  }
+  else if (cmd.startsWith("V")) {
+    int id = cmd.substring(1).toInt();
+    if (id >= 1 && id <= 255) {
+      verifyFingerprint(id);
+    } else {
+      Serial.println("Error: ID must be 1-255");
+    }
+  }
+  else if (cmd.startsWith("D")) {
+    if (cmd == "DA") {
+      deleteAllFingerprints();
+    } else {
+      int id = cmd.substring(1).toInt();
+      if (id >= 1 && id <= 255) {
+        deleteFingerprint(id);
+      } else {
+        Serial.println("Error: ID must be 1-255");
+      }
+    }
+  }
+  else if (cmd == "C") {
+    getTemplateCount();
+  }
+  else if (cmd == "R") {
+    readSystemParameters();
+  }
+  else if (cmd == "CLEAR") {
+    deleteAllFingerprints();
+  }
+  else if (cmd == "TEST") {
+    testFlashWrite();
+  }
+  else if (cmd == "RESET") {
+    factoryReset();
+  }
+  else if (cmd == "UNLOCK") {
+    unlockFlash();
+  }
+  else {
+    Serial.println("Unknown command!");
+  }
+}
+
+void enrollFingerprint(uint8_t id) {
+  Serial.printf("\n--- Enrolling Fingerprint ID: %d ---\n", id);
+ 
+  // Step 1: Capture first image
+  Serial.println("Place finger on sensor...");
+  controlLED(true, false, 0); // Blue breathing
+ 
+  if (!getImage()) {
+    Serial.println("✗ Failed to capture first image!");
+    controlLED(false, false, 0);
+    return;
+  }
+ 
+  // Convert first image
+  if (!image2Tz(CHAR_BUFFER_1)) {
+    Serial.println("✗ Failed to convert first image!");
+    controlLED(false, false, 0);
+    return;
+  }
+ 
+  Serial.println("✓ First sample captured!");
+  Serial.println("Remove finger...");
+  
+  // Wait for finger to be removed
+  delay(1000);
+  while(true) {
+    uint8_t packet[] = {CMD_GEN_IMG};
+    sendPacket(PID_COMMAND, packet, 1);
+    if (receivePacket() && rxBuffer[9] == ACK_NO_FINGER) {
+      break;
+    }
+    delay(200);
+  }
+  
+  Serial.println("✓ Finger removed");
+  delay(500);
+ 
+  // Step 2: Capture second image
+  Serial.println("Place same finger again...");
+  controlLED(true, false, 0); // Blue breathing
+ 
+  if (!getImage()) {
+    Serial.println("✗ Failed to capture second image!");
+    controlLED(false, false, 0);
+    return;
+  }
+ 
+  // Convert second image
+  if (!image2Tz(CHAR_BUFFER_2)) {
+    Serial.println("✗ Failed to convert second image!");
+    controlLED(false, false, 0);
+    return;
+  }
+ 
+  Serial.println("✓ Second sample captured!");
+ 
+  // Create model from two samples
+  if (!createModel()) {
+    Serial.println("✗ Fingerprints don't match!");
+    controlLED(false, false, 0);
+    return;
+  }
+ 
+  Serial.println("✓ Model created successfully!");
+ 
+  // Store model - FIXED: Use CHAR_BUFFER_2 and correct page number
+  if (!storeModel(CHAR_BUFFER_2, id)) {
+    Serial.println("✗ Failed to store fingerprint!");
+    controlLED(false, false, 0);
+    return;
+  }
+ 
+  Serial.printf("✓ Enrollment successful! ID: %d\n", id);
+  controlLED(false, true, 5); // Red flash 5 times
+}
+
+void searchFingerprint() {
+  Serial.println("\n--- Searching Fingerprint ---");
+  Serial.println("Place finger on sensor...");
+  controlLED(true, false, 0); // Blue breathing
+ 
+  if (!getImage()) {
+    Serial.println("✗ Failed to capture image!");
+    controlLED(false, false, 0);
+    return;
+  }
+ 
+  if (!image2Tz(CHAR_BUFFER_1)) {
+    Serial.println("✗ Failed to process image!");
+    controlLED(false, false, 0);
+    return;
+  }
+ 
+  // Search in database (page 0-3, 1000 templates)
+  uint8_t packet[] = {CMD_SEARCH, CHAR_BUFFER_1, 0x00, 0x00, 0x03, 0xE8};
+  sendPacket(PID_COMMAND, packet, 6);
+ 
+  if (receivePacket()) {
+    uint8_t ack = rxBuffer[9];
+    if (ack == ACK_SUCCESS) {
+      uint16_t id = (rxBuffer[10] << 8) | rxBuffer[11];
+      uint16_t score = (rxBuffer[12] << 8) | rxBuffer[13];
+      Serial.printf("✓ Match found! ID: %d, Confidence: %d\n", id, score);
+      controlLED(false, true, 3); // Red flash 3 times
+    } else if (ack == ACK_NOT_FOUND) {
+      Serial.println("✗ No match found!");
+      controlLED(false, false, 0);
+    } else {
+      Serial.printf("✗ Search failed! Error: 0x%02X\n", ack);
+      controlLED(false, false, 0);
+    }
+  }
+}
+
+void verifyFingerprint(uint8_t id) {
+  Serial.printf("\n--- Verifying Fingerprint ID: %d ---\n", id);
+  Serial.println("Place finger on sensor...");
+  controlLED(true, false, 0); // Blue breathing
+ 
+  if (!getImage()) {
+    Serial.println("✗ Failed to capture image!");
+    controlLED(false, false, 0);
+    return;
+  }
+ 
+  if (!image2Tz(CHAR_BUFFER_1)) {
+    Serial.println("✗ Failed to process image!");
+    controlLED(false, false, 0);
+    return;
+  }
+ 
+  // Load template from flash to buffer 2
+  if (!loadTemplate(id, CHAR_BUFFER_2)) {
+    Serial.println("✗ Template not found!");
+    controlLED(false, false, 0);
+    return;
+  }
+ 
+  // Match two buffers
+  uint8_t packet[] = {CMD_MATCH};
+  sendPacket(PID_COMMAND, packet, 1);
+ 
+  if (receivePacket()) {
+    uint8_t ack = rxBuffer[9];
+    if (ack == ACK_SUCCESS) {
+      uint16_t score = (rxBuffer[10] << 8) | rxBuffer[11];
+      Serial.printf("✓ Verification successful! Confidence: %d\n", score);
+      controlLED(false, true, 3); // Red flash 3 times
+    } else {
+      Serial.println("✗ Verification failed - No match!");
+      controlLED(false, false, 0);
+    }
+  }
+}
+
+void deleteFingerprint(uint8_t id) {
+  Serial.printf("\n--- Deleting Fingerprint ID: %d ---\n", id);
+ 
+  uint8_t packet[] = {CMD_DELETE, (uint8_t)(id >> 8), (uint8_t)(id & 0xFF), 0x00, 0x01};
+  sendPacket(PID_COMMAND, packet, 5);
+ 
+  if (receivePacket()) {
+    uint8_t ack = rxBuffer[9];
+    if (ack == ACK_SUCCESS) {
+      Serial.println("✓ Delete successful!");
+    } else {
+      Serial.printf("✗ Delete failed! Error: 0x%02X\n", ack);
+    }
+  }
+}
+
+void deleteAllFingerprints() {
+  Serial.println("\n--- Deleting All Fingerprints ---");
+ 
+  uint8_t packet[] = {CMD_EMPTY};
+  sendPacket(PID_COMMAND, packet, 1);
+ 
+  if (receivePacket()) {
+    uint8_t ack = rxBuffer[9];
+    if (ack == ACK_SUCCESS) {
+      Serial.println("✓ All fingerprints deleted!");
+    } else {
+      Serial.printf("✗ Delete failed! Error: 0x%02X\n", ack);
+    }
+  }
+}
+
+void getTemplateCount() {
+  Serial.println("\n--- Getting Template Count ---");
+ 
+  uint8_t packet[] = {0x1D}; // Template count command
+  sendPacket(PID_COMMAND, packet, 1);
+ 
+  if (receivePacket()) {
+    uint8_t ack = rxBuffer[9];
+    if (ack == ACK_SUCCESS) {
+      uint16_t count = (rxBuffer[10] << 8) | rxBuffer[11];
+      Serial.printf("✓ Stored fingerprints: %d\n", count);
+    } else {
+      Serial.println("✗ Failed to get count!");
+    }
+  }
+}
+
+void readSystemParameters() {
+  Serial.println("\n--- Reading System Parameters ---");
+  
+  uint8_t packet[] = {CMD_READ_SYS_PARA};
+  sendPacket(PID_COMMAND, packet, 1);
+  
+  if (receivePacket()) {
+    uint8_t ack = rxBuffer[9];
+    if (ack == ACK_SUCCESS) {
+      uint16_t statusReg = (rxBuffer[10] << 8) | rxBuffer[11];
+      uint16_t sensorType = (rxBuffer[12] << 8) | rxBuffer[13];
+      uint16_t capacity = (rxBuffer[14] << 8) | rxBuffer[15];
+      uint16_t securityLevel = (rxBuffer[16] << 8) | rxBuffer[17];
+      uint32_t deviceAddr = ((uint32_t)rxBuffer[18] << 24) | ((uint32_t)rxBuffer[19] << 16) | 
+                            ((uint32_t)rxBuffer[20] << 8) | rxBuffer[21];
+      uint16_t packetSize = (rxBuffer[22] << 8) | rxBuffer[23];
+      uint16_t baudRate = (rxBuffer[24] << 8) | rxBuffer[25];
+      
+      Serial.println("✓ System Parameters:");
+      Serial.printf("  Status Register: 0x%04X\n", statusReg);
+      Serial.printf("  Sensor Type: 0x%04X\n", sensorType);
+      Serial.printf("  Library Capacity: %d\n", capacity);
+      Serial.printf("  Security Level: %d\n", securityLevel);
+      Serial.printf("  Device Address: 0x%08X\n", deviceAddr);
+      Serial.printf("  Packet Size: %d bytes\n", packetSize * 32);
+      Serial.printf("  Baud Rate: %d bps\n", baudRate * 9600);
+    } else {
+      Serial.printf("✗ Failed to read parameters! Error: 0x%02X\n", ack);
+    }
+  }
+}
+
+void testFlashWrite() {
+  Serial.println("\n--- Testing Flash Write ---");
+  Serial.println("This will attempt to write to different memory locations");
+  
+  // First, create a dummy fingerprint model in buffer
+  Serial.println("Capturing test fingerprint...");
+  Serial.println("Place finger on sensor...");
+  
+  if (!getImage()) {
+    Serial.println("✗ Need a finger to test! Aborting.");
+    return;
+  }
+  
+  if (!image2Tz(CHAR_BUFFER_1)) {
+    Serial.println("✗ Failed to process image!");
+    return;
+  }
+  
+  Serial.println("✓ Test fingerprint captured");
+  
+  // Try writing to multiple locations
+  int testLocations[] = {1, 10, 50, 100, 200};
+  
+  for (int i = 0; i < 5; i++) {
+    int loc = testLocations[i];
+    Serial.printf("\nTesting location %d...\n", loc);
+    
+    // Try with page 0x00
+    uint8_t packet1[] = {CMD_STORE, CHAR_BUFFER_1, 0x00, (uint8_t)loc};
+    sendPacket(PID_COMMAND, packet1, 4);
+    if (receivePacket()) {
+      uint8_t ack = rxBuffer[9];
+      Serial.printf("  Page 0x00: %s (0x%02X)\n", 
+                    ack == ACK_SUCCESS ? "SUCCESS" : "FAILED", ack);
+      if (ack == ACK_SUCCESS) {
+        Serial.printf("  ✓✓✓ FOUND WORKING LOCATION: ID=%d, Page=0x00 ✓✓✓\n", loc);
+        return;
+      }
+    }
+    
+    delay(100);
+    
+    // Try with page 0x01
+    uint8_t packet2[] = {CMD_STORE, CHAR_BUFFER_1, 0x01, (uint8_t)loc};
+    sendPacket(PID_COMMAND, packet2, 4);
+    if (receivePacket()) {
+      uint8_t ack = rxBuffer[9];
+      Serial.printf("  Page 0x01: %s (0x%02X)\n", 
+                    ack == ACK_SUCCESS ? "SUCCESS" : "FAILED", ack);
+      if (ack == ACK_SUCCESS) {
+        Serial.printf("  ✓✓✓ FOUND WORKING LOCATION: ID=%d, Page=0x01 ✓✓✓\n", loc);
+        return;
+      }
+    }
+    
+    delay(100);
+  }
+  
+  Serial.println("\n✗ All test locations failed!");
+  Serial.println("Your sensor's flash memory may be:");
+  Serial.println("  1. Hardware defective");
+  Serial.println("  2. Write-protected (contact manufacturer)");
+  Serial.println("  3. Requires factory reset procedure");
+}
+
+void factoryReset() {
+  Serial.println("\n╔════════════════════════════════════════╗");
+  Serial.println("║      FACTORY RESET PROCEDURE          ║");
+  Serial.println("╚════════════════════════════════════════╝\n");
+  
+  Serial.println("Step 1: Clearing all fingerprints...");
+  uint8_t packet1[] = {CMD_EMPTY};
+  sendPacket(PID_COMMAND, packet1, 1);
+  if (receivePacket()) {
+    uint8_t ack = rxBuffer[9];
+    Serial.printf("  Clear database: %s (0x%02X)\n", 
+                  ack == ACK_SUCCESS ? "SUCCESS" : "FAILED", ack);
+  }
+  delay(500);
+  
+  Serial.println("\nStep 2: Resetting system parameters to default...");
+  // Try to reset baud rate to default (57600 = N=6)
+  uint8_t packet2[] = {0x0E, 0x04, 0x06}; // SetSysPara: Parameter 4 (baud), Value 6
+  sendPacket(PID_COMMAND, packet2, 3);
+  if (receivePacket()) {
+    uint8_t ack = rxBuffer[9];
+    Serial.printf("  Reset baud rate: %s (0x%02X)\n", 
+                  ack == ACK_SUCCESS ? "SUCCESS" : "FAILED", ack);
+  }
+  delay(500);
+  
+  Serial.println("\nStep 3: Resetting security level...");
+  uint8_t packet3[] = {0x0E, 0x05, 0x03}; // SetSysPara: Parameter 5 (security), Value 3
+  sendPacket(PID_COMMAND, packet3, 3);
+  if (receivePacket()) {
+    uint8_t ack = rxBuffer[9];
+    Serial.printf("  Reset security: %s (0x%02X)\n", 
+                  ack == ACK_SUCCESS ? "SUCCESS" : "FAILED", ack);
+  }
+  delay(500);
+  
+  Serial.println("\nStep 4: Soft reset...");
+  uint8_t packet4[] = {0x3D}; // SoftReset command
+  sendPacket(PID_COMMAND, packet4, 1);
+  delay(2000); // Wait for reset
+  
+  Serial.println("\nStep 5: Re-verifying connection...");
+  delay(1000);
+  if (verifyPassword()) {
+    Serial.println("✓ Sensor reconnected!");
+  } else {
+    Serial.println("✗ Sensor not responding (may need power cycle)");
+  }
+  
+  Serial.println("\n╔════════════════════════════════════════╗");
+  Serial.println("║   RESET COMPLETE - Testing Flash...   ║");
+  Serial.println("╚════════════════════════════════════════╝\n");
+  
+  Serial.println("Please run TEST command again to check if flash is now working.");
+}
+
+void unlockFlash() {
+  Serial.println("\n--- Attempting Flash Unlock Procedures ---\n");
+  
+  // Method 1: Try writing with different buffer configurations
+  Serial.println("Method 1: Testing buffer configurations...");
+  
+  // Capture a fingerprint first
+  Serial.println("Place finger on sensor...");
+  if (!getImage() || !image2Tz(CHAR_BUFFER_1)) {
+    Serial.println("✗ Need valid fingerprint to test!");
+    return;
+  }
+  
+  // Copy to buffer 2
+  if (!image2Tz(CHAR_BUFFER_2)) {
+    Serial.println("✗ Failed to process to buffer 2!");
+    return;
+  }
+  
+  // Create model
+  if (!createModel()) {
+    Serial.println("✗ Failed to create model!");
+    return;
+  }
+  
+  Serial.println("✓ Model ready for testing");
+  
+  // Try different page/location combinations
+  struct TestCombo {
+    uint8_t buffer;
+    uint8_t pageHigh;
+    uint8_t pageLow;
+    const char* desc;
+  };
+  
+  TestCombo combos[] = {
+    {CHAR_BUFFER_2, 0x00, 0x01, "Buffer 2, Page 0x0001"},
+    {CHAR_BUFFER_2, 0x00, 0x0A, "Buffer 2, Page 0x000A"},
+    {CHAR_BUFFER_1, 0x00, 0x01, "Buffer 1, Page 0x0001"},
+    {CHAR_BUFFER_1, 0x00, 0x0A, "Buffer 1, Page 0x000A"},
+    {CHAR_BUFFER_2, 0x01, 0x00, "Buffer 2, Page 0x0100"},
+    {CHAR_BUFFER_1, 0x01, 0x00, "Buffer 1, Page 0x0100"},
+  };
+  
+  for (int i = 0; i < 6; i++) {
+    Serial.printf("Testing: %s... ", combos[i].desc);
+    uint8_t packet[] = {CMD_STORE, combos[i].buffer, combos[i].pageHigh, combos[i].pageLow};
+    sendPacket(PID_COMMAND, packet, 4);
+    
+    if (receivePacket()) {
+      uint8_t ack = rxBuffer[9];
+      if (ack == ACK_SUCCESS) {
+        Serial.println("SUCCESS! ✓✓✓");
+        Serial.printf("WORKING COMBINATION FOUND:\n");
+        Serial.printf("  Buffer: %d\n", combos[i].buffer);
+        Serial.printf("  Page: 0x%02X%02X\n", combos[i].pageHigh, combos[i].pageLow);
+        return;
+      } else {
+        Serial.printf("FAILED (0x%02X)\n", ack);
+      }
+    }
+    delay(200);
+  }
+  
+  Serial.println("\n✗ All unlock attempts failed!");
+  Serial.println("\nPossible solutions:");
+  Serial.println("1. Power cycle the sensor (disconnect power for 30 seconds)");
+  Serial.println("2. Check if your R307 module is genuine");
+  Serial.println("3. Contact supplier - may need RMA/replacement");
+  Serial.println("4. Some modules have hardware write-protect jumpers");
+}
+
+bool getImage() {
+  int attempts = 0;
+  while (attempts < 20) {  // Increased attempts
+    uint8_t packet[] = {CMD_GEN_IMG};
+    sendPacket(PID_COMMAND, packet, 1);
+   
+    if (receivePacket()) {
+      uint8_t ack = rxBuffer[9];
+      if (ack == ACK_SUCCESS) {
+        return true;
+      } else if (ack == ACK_NO_FINGER) {
+        attempts++;
+        delay(300);  // Increased delay
+        if (attempts % 5 == 0) {
+          Serial.print(".");  // Progress indicator
+        }
+      } else {
+        Serial.printf("Image capture error: 0x%02X\n", ack);
+        return false;
+      }
+    } else {
+      Serial.println("No response from sensor!");
+      return false;
+    }
+  }
+  Serial.println("\nTimeout waiting for finger!");
+  return false;
+}
+
+bool image2Tz(uint8_t bufferId) {
+  uint8_t packet[] = {CMD_IMG_2_TZ, bufferId};
+  sendPacket(PID_COMMAND, packet, 2);
+ 
+  if (receivePacket()) {
+    uint8_t ack = rxBuffer[9];
+    if (ack == ACK_SUCCESS) {
+      return true;
+    } else {
+      Serial.printf("Image conversion error: 0x%02X\n", ack);
+      return false;
+    }
+  }
+  return false;
+}
+
+bool createModel() {
+  uint8_t packet[] = {CMD_REG_MODEL};
+  sendPacket(PID_COMMAND, packet, 1);
+ 
+  if (receivePacket()) {
+    uint8_t ack = rxBuffer[9];
+    if (ack == ACK_SUCCESS) {
+      return true;
+    } else {
+      Serial.printf("Model creation error: 0x%02X\n", ack);
+      return false;
+    }
+  }
+  return false;
+}
+
+bool storeModel(uint8_t bufferId, uint16_t id) {
+  // Use Page 0x00 format that works with this sensor
+  uint8_t packet[] = {CMD_STORE, bufferId, 0x00, (uint8_t)(id & 0xFF)};
+  sendPacket(PID_COMMAND, packet, 4);
+ 
+  if (receivePacket()) {
+    uint8_t ack = rxBuffer[9];
+    if (ack == ACK_SUCCESS) {
+      return true;
+    } else {
+      Serial.printf("Storage error: 0x%02X (ID: %d)\n", ack, id);
+      return false;
+    }
+  }
+  return false;
+}
+
+bool loadTemplate(uint16_t id, uint8_t bufferId) {
+  uint8_t packet[] = {CMD_LOAD, bufferId, (uint8_t)(id >> 8), (uint8_t)(id & 0xFF)};
+  sendPacket(PID_COMMAND, packet, 4);
+ 
+  if (receivePacket()) {
+    return rxBuffer[9] == ACK_SUCCESS;
+  }
+  return false;
+}
+
+bool verifyPassword() {
+  // Clear buffers before verification
+  while(FPSerial.available()) FPSerial.read();
+  
+  uint8_t packet[] = {CMD_VERIFY_PASSWORD, 0x00, 0x00, 0x00, 0x00};
+  sendPacket(PID_COMMAND, packet, 5);
+ 
+  if (receivePacket()) {
+    return rxBuffer[9] == ACK_SUCCESS;
+  }
+  return false;
+}
+
+void controlLED(bool breathing, bool flash, uint8_t count) {
+  uint8_t ctrl = 0x00;
+  if (breathing) ctrl = 0x01; // Blue breathing
+  if (flash) ctrl = 0x02;     // Red flash
+ 
+  uint8_t packet[] = {CMD_LED_CONFIG, ctrl, 0x50, count, 0x00};
+  sendPacket(PID_COMMAND, packet, 5);
+  receivePacket(); // Wait for response
+}
+
+void sendPacket(uint8_t pid, uint8_t* data, uint16_t len) {
+  // Clear receive buffer before sending
+  while(FPSerial.available()) FPSerial.read();
+  
+  uint16_t checksum = pid + len + 2;
+  for (int i = 0; i < len; i++) {
+    checksum += data[i];
+  }
+ 
+  FPSerial.write(0xEF);
+  FPSerial.write(0x01);
+  FPSerial.write(0xFF);
+  FPSerial.write(0xFF);
+  FPSerial.write(0xFF);
+  FPSerial.write(0xFF);
+  FPSerial.write(pid);
+  FPSerial.write((len + 2) >> 8);
+  FPSerial.write((len + 2) & 0xFF);
+ 
+  for (int i = 0; i < len; i++) {
+    FPSerial.write(data[i]);
+  }
+ 
+  FPSerial.write(checksum >> 8);
+  FPSerial.write(checksum & 0xFF);
+  
+  FPSerial.flush(); // Wait for transmission to complete
+  delay(50); // Small delay for sensor to process
+}
+
+bool receivePacket() {
+  rxIndex = 0;
+  memset(rxBuffer, 0, sizeof(rxBuffer));
+  unsigned long startTime = millis();
+ 
+  // Wait for packet header
+  while (millis() - startTime < 3000) {
+    if (FPSerial.available()) {
+      uint8_t b = FPSerial.read();
+      
+      // Look for header start
+      if (rxIndex == 0 && b != 0xEF) continue;
+      if (rxIndex == 1 && b != 0x01) {
+        rxIndex = 0;
+        continue;
+      }
+      
+      rxBuffer[rxIndex++] = b;
+     
+      // Check if we have enough bytes to determine packet length
+      if (rxIndex >= 9) {
+        uint16_t len = (rxBuffer[7] << 8) | rxBuffer[8];
+        // Check if we received complete packet
+        if (rxIndex >= (9 + len)) {
+          return true;
+        }
+      }
+      
+      // Prevent buffer overflow
+      if (rxIndex >= sizeof(rxBuffer)) {
+        Serial.println("Buffer overflow!");
+        return false;
+      }
+    }
+  }
+  
+  if (rxIndex > 0) {
+    Serial.printf("Timeout! Received %d bytes\n", rxIndex);
+  }
+  return false;
+}
