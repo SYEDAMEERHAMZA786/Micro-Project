@@ -1,0 +1,610 @@
+// ============================================================================
+// ESP32 BRIDGE CODE - R307 Fingerprint Sensor to PIC16F877A
+// ESP32 acts as bridge between sensor and PIC
+// ============================================================================
+
+#include <HardwareSerial.h>
+
+// R307 Communication Protocol
+#define HEADER_START 0xEF01
+#define ADDR_DEFAULT 0xFFFFFFFF
+
+// Packet IDs
+#define PID_COMMAND 0x01
+#define PID_ACK 0x07
+
+// Commands
+#define CMD_GEN_IMG 0x01
+#define CMD_IMG_2_TZ 0x02
+#define CMD_MATCH 0x03
+#define CMD_SEARCH 0x04
+#define CMD_REG_MODEL 0x05
+#define CMD_STORE 0x06
+#define CMD_DELETE 0x0C
+#define CMD_EMPTY 0x0D
+#define CMD_TEMPLATE_COUNT 0x1D
+#define CMD_LED_CONFIG 0x35
+
+// Confirmation codes
+#define ACK_SUCCESS 0x00
+#define ACK_ERROR 0x01
+#define ACK_NO_FINGER 0x02
+#define ACK_IMG_FAIL 0x03
+#define ACK_NOT_FOUND 0x09
+#define ACK_ENROLL_MISMATCH 0x0A
+
+// Buffer IDs
+#define CHAR_BUFFER_1 0x01
+#define CHAR_BUFFER_2 0x02
+
+// Communication Protocol with PIC
+#define PACKET_HEADER 0xAA
+#define PACKET_FOOTER 0x55
+
+// Commands FROM PIC to ESP32
+#define PIC_CMD_VERIFY 0x01      // Request fingerprint verification
+#define PIC_CMD_ENROLL 0x02      // Request fingerprint enrollment
+#define PIC_CMD_DELETE 0x03      // Request fingerprint deletion
+#define PIC_CMD_GET_COUNT 0x04   // Request template count
+#define PIC_CMD_DELETE_ALL 0x05  // Request delete all
+
+// Responses FROM ESP32 to PIC
+#define ESP_ACK_READY 0x10           // ESP32 ready
+#define ESP_ACK_MATCH_FOUND 0x11     // Fingerprint matched
+#define ESP_ACK_MATCH_NOTFOUND 0x12  // Fingerprint not found
+#define ESP_ACK_ENROLL_SUCCESS 0x13  // Enrollment successful
+#define ESP_ACK_ENROLL_FAIL 0x14     // Enrollment failed
+#define ESP_ACK_DELETE_SUCCESS 0x15  // Delete successful
+#define ESP_ACK_DELETE_FAIL 0x16     // Delete failed
+#define ESP_ACK_ERROR 0x17           // General error
+#define ESP_ACK_NO_FINGER 0x18       // No finger detected
+#define ESP_ACK_PLACE_AGAIN 0x19     // Place finger again
+#define ESP_ACK_COUNT 0x1A           // Template count response
+#define ESP_ACK_PROCESSING 0x1B      // Processing...
+
+// ESP32 Serial Pins
+#define RXD2 16  // To R307
+#define TXD2 17  // To R307
+#define RXD1 3   // To PIC (USB RX - can be remapped)
+#define TXD1 1   // To PIC (USB TX - can be remapped)
+
+// Use Serial1 for PIC communication on different pins
+#define PIC_RX 18  // GPIO18
+#define PIC_TX 19  // GPIO19
+
+HardwareSerial FPSerial(2);      // R307 on Serial2
+HardwareSerial PICSerial(1);     // PIC on Serial1
+
+uint8_t rxBuffer[128];
+int rxIndex = 0;
+
+// Function Prototypes
+void sendPacket(uint8_t pid, uint8_t* data, uint16_t len);
+bool receivePacket();
+bool getImage();
+bool image2Tz(uint8_t bufferId);
+bool createModel();
+bool storeModel(uint8_t bufferId, uint16_t id);
+bool searchFingerprint(uint16_t* id, uint16_t* score);
+bool deleteFingerprint(uint16_t id);
+bool deleteAllFingerprints();
+bool getTemplateCount(uint16_t* count);
+void controlLED(bool breathing, bool flash, uint8_t count);
+
+// PIC Communication Functions
+void PIC_SendPacket(uint8_t cmd, uint8_t* data, uint8_t len);
+void PIC_SendSimple(uint8_t cmd);
+void PIC_SendWithID(uint8_t cmd, uint16_t id, uint16_t score);
+void processPICCommand();
+
+// Actions
+void handleVerify();
+void handleEnroll();
+void handleDelete();
+void handleGetCount();
+void handleDeleteAll();
+
+void setup() {
+  Serial.begin(115200);  // Debug
+  FPSerial.begin(57600, SERIAL_8N1, RXD2, TXD2);  // R307
+  PICSerial.begin(9600, SERIAL_8N1, PIC_RX, PIC_TX);  // PIC
+  
+  delay(1000);
+  
+  // Clear buffers
+  while(FPSerial.available()) FPSerial.read();
+  while(PICSerial.available()) PICSerial.read();
+  
+  Serial.println("\n=== ESP32 BRIDGE SYSTEM ===");
+  Serial.println("R307 <-> ESP32 <-> PIC16F877A");
+  Serial.println("===========================\n");
+  
+  // Verify R307 connection
+  delay(500);
+  uint8_t packet[] = {0x13, 0x00, 0x00, 0x00, 0x00}; // Verify password
+  sendPacket(PID_COMMAND, packet, 5);
+  
+  if (receivePacket() && rxBuffer[9] == ACK_SUCCESS) {
+    Serial.println("✓ R307 sensor connected!");
+    controlLED(true, false, 3);
+    
+    // Send ready signal to PIC
+    PIC_SendSimple(ESP_ACK_READY);
+    Serial.println("✓ Ready signal sent to PIC");
+  } else {
+    Serial.println("✗ R307 sensor not found!");
+  }
+}
+
+void loop() {
+  // Check for commands from PIC
+  if (PICSerial.available()) {
+    processPICCommand();
+  }
+  
+  delay(10);
+}
+
+// ============================================================================
+// PIC COMMUNICATION FUNCTIONS
+// ============================================================================
+
+void PIC_SendPacket(uint8_t cmd, uint8_t* data, uint8_t len) {
+  uint8_t checksum = PACKET_HEADER + cmd + len;
+  
+  PICSerial.write(PACKET_HEADER);  // Header
+  PICSerial.write(cmd);             // Command
+  PICSerial.write(len);             // Data length
+  
+  for (uint8_t i = 0; i < len; i++) {
+    PICSerial.write(data[i]);
+    checksum += data[i];
+  }
+  
+  PICSerial.write(checksum);        // Checksum
+  PICSerial.write(PACKET_FOOTER);   // Footer
+  PICSerial.flush();
+}
+
+void PIC_SendSimple(uint8_t cmd) {
+  PIC_SendPacket(cmd, NULL, 0);
+}
+
+void PIC_SendWithID(uint8_t cmd, uint16_t id, uint16_t score) {
+  uint8_t data[4];
+  data[0] = (id >> 8) & 0xFF;
+  data[1] = id & 0xFF;
+  data[2] = (score >> 8) & 0xFF;
+  data[3] = score & 0xFF;
+  PIC_SendPacket(cmd, data, 4);
+}
+
+void processPICCommand() {
+  // Wait for header
+  if (PICSerial.read() != PACKET_HEADER) {
+    return;
+  }
+  
+  // Read command
+  while(!PICSerial.available()) delay(1);
+  uint8_t cmd = PICSerial.read();
+  
+  // Read length
+  while(!PICSerial.available()) delay(1);
+  uint8_t len = PICSerial.read();
+  
+  // Read data
+  uint8_t data[16];
+  for (uint8_t i = 0; i < len; i++) {
+    while(!PICSerial.available()) delay(1);
+    data[i] = PICSerial.read();
+  }
+  
+  // Read checksum and footer
+  while(!PICSerial.available()) delay(1);
+  uint8_t checksum = PICSerial.read();
+  while(!PICSerial.available()) delay(1);
+  uint8_t footer = PICSerial.read();
+  
+  // Verify packet
+  if (footer != PACKET_FOOTER) {
+    Serial.println("Invalid packet footer!");
+    return;
+  }
+  
+  // Process command
+  Serial.printf("Received from PIC: CMD=0x%02X\n", cmd);
+  
+  switch(cmd) {
+    case PIC_CMD_VERIFY:
+      handleVerify();
+      break;
+      
+    case PIC_CMD_ENROLL:
+      handleEnroll();
+      break;
+      
+    case PIC_CMD_DELETE:
+      if (len >= 2) {
+        uint16_t id = (data[0] << 8) | data[1];
+        handleDelete();  // Will search and delete matched finger
+      }
+      break;
+      
+    case PIC_CMD_GET_COUNT:
+      handleGetCount();
+      break;
+      
+    case PIC_CMD_DELETE_ALL:
+      handleDeleteAll();
+      break;
+      
+    default:
+      Serial.printf("Unknown command: 0x%02X\n", cmd);
+      PIC_SendSimple(ESP_ACK_ERROR);
+      break;
+  }
+}
+
+// ============================================================================
+// FINGERPRINT OPERATIONS
+// ============================================================================
+
+void handleVerify() {
+  Serial.println("\n--- VERIFY MODE ---");
+  
+  // Signal PIC to show "Place Finger"
+  PIC_SendSimple(ESP_ACK_PROCESSING);
+  controlLED(true, false, 0); // Blue breathing
+  
+  // Wait for finger
+  if (!getImage()) {
+    Serial.println("✗ No finger detected!");
+    PIC_SendSimple(ESP_ACK_NO_FINGER);
+    controlLED(false, false, 0);
+    return;
+  }
+  
+  // Convert image
+  if (!image2Tz(CHAR_BUFFER_1)) {
+    Serial.println("✗ Failed to process image!");
+    PIC_SendSimple(ESP_ACK_ERROR);
+    controlLED(false, false, 0);
+    return;
+  }
+  
+  // Search
+  uint16_t id = 0, score = 0;
+  if (searchFingerprint(&id, &score)) {
+    Serial.printf("✓ Match found! ID=%d, Score=%d\n", id, score);
+    PIC_SendWithID(ESP_ACK_MATCH_FOUND, id, score);
+    controlLED(false, true, 3); // Red flash
+  } else {
+    Serial.println("✗ No match found!");
+    PIC_SendSimple(ESP_ACK_MATCH_NOTFOUND);
+    controlLED(false, false, 0);
+  }
+}
+
+void handleEnroll() {
+  Serial.println("\n--- ENROLL MODE ---");
+  
+  // Get new ID
+  uint16_t count = 0;
+  getTemplateCount(&count);
+  uint16_t newID = count + 1;
+  
+  Serial.printf("Enrolling as ID: %d\n", newID);
+  
+  // Step 1: First image
+  PIC_SendSimple(ESP_ACK_PROCESSING);
+  controlLED(true, false, 0); // Blue breathing
+  
+  if (!getImage()) {
+    PIC_SendSimple(ESP_ACK_NO_FINGER);
+    controlLED(false, false, 0);
+    return;
+  }
+  
+  if (!image2Tz(CHAR_BUFFER_1)) {
+    PIC_SendSimple(ESP_ACK_ERROR);
+    controlLED(false, false, 0);
+    return;
+  }
+  
+  Serial.println("✓ First sample captured");
+  
+  // Wait for finger removal
+  delay(1000);
+  while(true) {
+    uint8_t packet[] = {CMD_GEN_IMG};
+    sendPacket(PID_COMMAND, packet, 1);
+    if (receivePacket() && rxBuffer[9] == ACK_NO_FINGER) {
+      break;
+    }
+    delay(200);
+  }
+  
+  Serial.println("✓ Finger removed");
+  delay(500);
+  
+  // Step 2: Second image
+  PIC_SendSimple(ESP_ACK_PLACE_AGAIN);
+  controlLED(true, false, 0);
+  
+  if (!getImage()) {
+    PIC_SendSimple(ESP_ACK_NO_FINGER);
+    controlLED(false, false, 0);
+    return;
+  }
+  
+  if (!image2Tz(CHAR_BUFFER_2)) {
+    PIC_SendSimple(ESP_ACK_ERROR);
+    controlLED(false, false, 0);
+    return;
+  }
+  
+  Serial.println("✓ Second sample captured");
+  
+  // Create model
+  if (!createModel()) {
+    Serial.println("✗ Fingerprints don't match!");
+    PIC_SendSimple(ESP_ACK_ENROLL_FAIL);
+    controlLED(false, false, 0);
+    return;
+  }
+  
+  Serial.println("✓ Model created");
+  
+  // Store model
+  if (!storeModel(CHAR_BUFFER_2, newID)) {
+    Serial.println("✗ Failed to store!");
+    PIC_SendSimple(ESP_ACK_ENROLL_FAIL);
+    controlLED(false, false, 0);
+    return;
+  }
+  
+  Serial.printf("✓ Enrollment successful! ID=%d\n", newID);
+  uint8_t data[2] = {(newID >> 8) & 0xFF, newID & 0xFF};
+  PIC_SendPacket(ESP_ACK_ENROLL_SUCCESS, data, 2);
+  controlLED(false, true, 5); // Red flash 5 times
+}
+
+void handleDelete() {
+  Serial.println("\n--- DELETE MODE ---");
+  
+  // Verify finger first
+  PIC_SendSimple(ESP_ACK_PROCESSING);
+  controlLED(true, false, 0);
+  
+  if (!getImage()) {
+    PIC_SendSimple(ESP_ACK_NO_FINGER);
+    controlLED(false, false, 0);
+    return;
+  }
+  
+  if (!image2Tz(CHAR_BUFFER_1)) {
+    PIC_SendSimple(ESP_ACK_ERROR);
+    controlLED(false, false, 0);
+    return;
+  }
+  
+  // Search to find ID
+  uint16_t id = 0, score = 0;
+  if (!searchFingerprint(&id, &score)) {
+    Serial.println("✗ Fingerprint not found!");
+    PIC_SendSimple(ESP_ACK_DELETE_FAIL);
+    controlLED(false, false, 0);
+    return;
+  }
+  
+  // Delete it
+  if (deleteFingerprint(id)) {
+    Serial.printf("✓ Deleted ID: %d\n", id);
+    uint8_t data[2] = {(id >> 8) & 0xFF, id & 0xFF};
+    PIC_SendPacket(ESP_ACK_DELETE_SUCCESS, data, 2);
+    controlLED(false, true, 3);
+  } else {
+    Serial.println("✗ Delete failed!");
+    PIC_SendSimple(ESP_ACK_DELETE_FAIL);
+    controlLED(false, false, 0);
+  }
+}
+
+void handleGetCount() {
+  uint16_t count = 0;
+  if (getTemplateCount(&count)) {
+    Serial.printf("Template count: %d\n", count);
+    uint8_t data[2] = {(count >> 8) & 0xFF, count & 0xFF};
+    PIC_SendPacket(ESP_ACK_COUNT, data, 2);
+  } else {
+    PIC_SendSimple(ESP_ACK_ERROR);
+  }
+}
+
+void handleDeleteAll() {
+  Serial.println("\n--- DELETE ALL ---");
+  
+  if (deleteAllFingerprints()) {
+    Serial.println("✓ All fingerprints deleted!");
+    PIC_SendSimple(ESP_ACK_DELETE_SUCCESS);
+  } else {
+    Serial.println("✗ Delete all failed!");
+    PIC_SendSimple(ESP_ACK_DELETE_FAIL);
+  }
+}
+
+// ============================================================================
+// R307 SENSOR FUNCTIONS
+// ============================================================================
+
+bool getImage() {
+  int attempts = 0;
+  while (attempts < 20) {
+    uint8_t packet[] = {CMD_GEN_IMG};
+    sendPacket(PID_COMMAND, packet, 1);
+    
+    if (receivePacket()) {
+      uint8_t ack = rxBuffer[9];
+      if (ack == ACK_SUCCESS) {
+        return true;
+      } else if (ack == ACK_NO_FINGER) {
+        attempts++;
+        delay(300);
+      } else {
+        return false;
+      }
+    }
+  }
+  return false;
+}
+
+bool image2Tz(uint8_t bufferId) {
+  uint8_t packet[] = {CMD_IMG_2_TZ, bufferId};
+  sendPacket(PID_COMMAND, packet, 2);
+  
+  if (receivePacket()) {
+    return rxBuffer[9] == ACK_SUCCESS;
+  }
+  return false;
+}
+
+bool createModel() {
+  uint8_t packet[] = {CMD_REG_MODEL};
+  sendPacket(PID_COMMAND, packet, 1);
+  
+  if (receivePacket()) {
+    return rxBuffer[9] == ACK_SUCCESS;
+  }
+  return false;
+}
+
+bool storeModel(uint8_t bufferId, uint16_t id) {
+  uint8_t packet[] = {CMD_STORE, bufferId, 0x00, (uint8_t)(id & 0xFF)};
+  sendPacket(PID_COMMAND, packet, 4);
+  
+  if (receivePacket()) {
+    return rxBuffer[9] == ACK_SUCCESS;
+  }
+  return false;
+}
+
+bool searchFingerprint(uint16_t* id, uint16_t* score) {
+  uint8_t packet[] = {CMD_SEARCH, CHAR_BUFFER_1, 0x00, 0x00, 0x03, 0xE8};
+  sendPacket(PID_COMMAND, packet, 6);
+  
+  if (receivePacket()) {
+    uint8_t ack = rxBuffer[9];
+    if (ack == ACK_SUCCESS) {
+      *id = (rxBuffer[10] << 8) | rxBuffer[11];
+      *score = (rxBuffer[12] << 8) | rxBuffer[13];
+      return true;
+    }
+  }
+  return false;
+}
+
+bool deleteFingerprint(uint16_t id) {
+  uint8_t packet[] = {CMD_DELETE, (uint8_t)(id >> 8), (uint8_t)(id & 0xFF), 0x00, 0x01};
+  sendPacket(PID_COMMAND, packet, 5);
+  
+  if (receivePacket()) {
+    return rxBuffer[9] == ACK_SUCCESS;
+  }
+  return false;
+}
+
+bool deleteAllFingerprints() {
+  uint8_t packet[] = {CMD_EMPTY};
+  sendPacket(PID_COMMAND, packet, 1);
+  
+  if (receivePacket()) {
+    return rxBuffer[9] == ACK_SUCCESS;
+  }
+  return false;
+}
+
+bool getTemplateCount(uint16_t* count) {
+  uint8_t packet[] = {CMD_TEMPLATE_COUNT};
+  sendPacket(PID_COMMAND, packet, 1);
+  
+  if (receivePacket()) {
+    uint8_t ack = rxBuffer[9];
+    if (ack == ACK_SUCCESS) {
+      *count = (rxBuffer[10] << 8) | rxBuffer[11];
+      return true;
+    }
+  }
+  return false;
+}
+
+void controlLED(bool breathing, bool flash, uint8_t count) {
+  uint8_t ctrl = 0x00;
+  if (breathing) ctrl = 0x01;
+  if (flash) ctrl = 0x02;
+  
+  uint8_t packet[] = {CMD_LED_CONFIG, ctrl, 0x50, count, 0x00};
+  sendPacket(PID_COMMAND, packet, 5);
+  receivePacket();
+}
+
+void sendPacket(uint8_t pid, uint8_t* data, uint16_t len) {
+  while(FPSerial.available()) FPSerial.read();
+  
+  uint16_t checksum = pid + len + 2;
+  for (int i = 0; i < len; i++) {
+    checksum += data[i];
+  }
+  
+  FPSerial.write(0xEF);
+  FPSerial.write(0x01);
+  FPSerial.write(0xFF);
+  FPSerial.write(0xFF);
+  FPSerial.write(0xFF);
+  FPSerial.write(0xFF);
+  FPSerial.write(pid);
+  FPSerial.write((len + 2) >> 8);
+  FPSerial.write((len + 2) & 0xFF);
+  
+  for (int i = 0; i < len; i++) {
+    FPSerial.write(data[i]);
+  }
+  
+  FPSerial.write(checksum >> 8);
+  FPSerial.write(checksum & 0xFF);
+  
+  FPSerial.flush();
+  delay(50);
+}
+
+bool receivePacket() {
+  rxIndex = 0;
+  memset(rxBuffer, 0, sizeof(rxBuffer));
+  unsigned long startTime = millis();
+  
+  while (millis() - startTime < 3000) {
+    if (FPSerial.available()) {
+      uint8_t b = FPSerial.read();
+      
+      if (rxIndex == 0 && b != 0xEF) continue;
+      if (rxIndex == 1 && b != 0x01) {
+        rxIndex = 0;
+        continue;
+      }
+      
+      rxBuffer[rxIndex++] = b;
+      
+      if (rxIndex >= 9) {
+        uint16_t len = (rxBuffer[7] << 8) | rxBuffer[8];
+        if (rxIndex >= (9 + len)) {
+          return true;
+        }
+      }
+      
+      if (rxIndex >= sizeof(rxBuffer)) {
+        return false;
+      }
+    }
+  }
+  return false;
+}
