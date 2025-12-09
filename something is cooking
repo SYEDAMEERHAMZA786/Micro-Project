@@ -1,0 +1,906 @@
+// ============================================================================
+// FINGERPRINT SECURITY SYSTEM - PIC16F877A with ESP32 Bridge
+// PIC controls: LCD, Buttons, Lock, Buzzer
+// ESP32 controls: R307 Fingerprint Sensor
+// ============================================================================
+
+#define _XTAL_FREQ 4000000
+
+#include <xc.h>
+#include <stdint.h>
+#include <string.h>
+
+#pragma config FOSC = XT
+#pragma config WDTE = OFF
+#pragma config PWRTE = ON
+#pragma config BOREN = ON
+#pragma config LVP = OFF
+#pragma config CPD = OFF
+#pragma config WRT = OFF
+#pragma config CP = OFF
+
+// Pin Definitions
+#define LCD_RS RC0
+#define LCD_EN RC1
+#define LCD_DATA PORTD
+#define BTN_MENU PORTBbits.RB6
+#define BTN_UP PORTBbits.RB2
+#define BTN_DOWN PORTBbits.RB1
+#define BTN_CONFIRM PORTBbits.RB3
+#define BUZZER PORTBbits.RB7
+#define PASS_BTN1 PORTAbits.RA3
+#define PASS_BTN2 PORTAbits.RA2
+#define PASS_BTN3 PORTAbits.RA1
+#define PASS_BTN4 PORTAbits.RA0
+
+// Servo
+#define SERVO_PIN RC2
+#define SERVO_TRIS TRISCbits.TRISC2
+
+// Communication Protocol
+#define PACKET_HEADER 0xAA
+#define PACKET_FOOTER 0x55
+
+// Commands TO ESP32
+#define PIC_CMD_VERIFY 0x01
+#define PIC_CMD_ENROLL 0x02
+#define PIC_CMD_DELETE 0x03
+#define PIC_CMD_GET_COUNT 0x04
+#define PIC_CMD_DELETE_ALL 0x05
+
+// Responses FROM ESP32
+#define ESP_ACK_READY 0x10
+#define ESP_ACK_MATCH_FOUND 0x11
+#define ESP_ACK_MATCH_NOTFOUND 0x12
+#define ESP_ACK_ENROLL_SUCCESS 0x13
+#define ESP_ACK_ENROLL_FAIL 0x14
+#define ESP_ACK_DELETE_SUCCESS 0x15
+#define ESP_ACK_DELETE_FAIL 0x16
+#define ESP_ACK_ERROR 0x17
+#define ESP_ACK_NO_FINGER 0x18
+#define ESP_ACK_PLACE_AGAIN 0x19
+#define ESP_ACK_COUNT 0x1A
+#define ESP_ACK_PROCESSING 0x1B
+
+// Global Variables
+#define PASSWORD_LENGTH 4
+uint8_t current_password[PASSWORD_LENGTH] = {1, 2, 3, 4};
+uint8_t menu_index = 0;
+uint8_t system_state = 0;
+uint8_t fingerprint_count = 0;
+
+const char* menu_items[5] = {
+    "1.Verify Finger",
+    "2.Add Finger   ",
+    "3.Delete Finger",
+    "4.Password Open",
+    "5.Change Pass  "
+};
+
+// Function Prototypes
+void LCD_Command(uint8_t cmd);
+void LCD_Char(char data);
+void LCD_Init(void);
+void LCD_Clear(void);
+void LCD_SetCursor(uint8_t row, uint8_t col);
+void LCD_String(const char* str);
+void LCD_Number(uint16_t num);
+void Buzzer_Beep(uint8_t count);
+void Buzzer_Tone(uint16_t ms);
+void Buzzer_Success(void);
+void Buzzer_Error(void);
+
+void Servo_Init(void);
+void generate_pulse(unsigned int angle);
+void Servo_Open(void);
+
+void UART_Init(void);
+void UART_Write(uint8_t data);
+uint8_t UART_Read(void);
+uint8_t UART_Available(void);
+void UART_Flush(void);
+
+void ESP_SendCommand(uint8_t cmd, uint8_t* data, uint8_t len);
+uint8_t ESP_ReceiveResponse(uint8_t* response, uint16_t timeout_ms);
+
+uint8_t Button_Read_Menu(void);
+uint8_t Button_Read_Up(void);
+uint8_t Button_Read_Down(void);
+uint8_t Button_Read_Confirm(void);
+uint8_t Button_Read_Pass1(void);
+uint8_t Button_Read_Pass2(void);
+uint8_t Button_Read_Pass3(void);
+uint8_t Button_Read_Pass4(void);
+
+void Verify_Fingerprint(void);
+void Add_Fingerprint(void);
+void Delete_Fingerprint(void);
+void Password_Open(void);
+void Change_Password(void);
+void Display_Idle(void);
+void Display_Menu(void);
+uint8_t Get_Password_Input(void);
+
+// ============================================================================
+// LCD FUNCTIONS
+// ============================================================================
+void LCD_Command(uint8_t cmd) {
+    LCD_RS = 0;
+    LCD_DATA = cmd;
+    LCD_EN = 1;
+    __delay_us(50);
+    LCD_EN = 0;
+    __delay_ms(2);
+}
+
+void LCD_Char(char data) {
+    LCD_RS = 1;
+    LCD_DATA = data;
+    LCD_EN = 1;
+    __delay_us(50);
+    LCD_EN = 0;
+    __delay_us(100);
+}
+
+void LCD_Init(void) {
+    __delay_ms(20);
+    LCD_RS = 0;
+    LCD_DATA = 0x30;
+    LCD_EN = 1; __delay_us(50); LCD_EN = 0;
+    __delay_ms(5);
+    LCD_EN = 1; __delay_us(50); LCD_EN = 0;
+    __delay_us(200);
+    LCD_EN = 1; __delay_us(50); LCD_EN = 0;
+    __delay_ms(1);
+    LCD_Command(0x38);
+    LCD_Command(0x0C);
+    LCD_Command(0x06);
+    LCD_Command(0x01);
+    __delay_ms(5);
+}
+
+void LCD_Clear(void) {
+    LCD_Command(0x01);
+    __delay_ms(2);
+}
+
+void LCD_SetCursor(uint8_t row, uint8_t col) {
+    if (row == 0) {
+        LCD_Command(0x80 + col);
+    } else {
+        LCD_Command(0xC0 + col);
+    }
+}
+
+void LCD_String(const char* str) {
+    while (*str) {
+        LCD_Char(*str++);
+    }
+}
+
+void LCD_Number(uint16_t num) {
+    char buffer[6];
+    uint8_t i = 0;
+    if (num == 0) {
+        LCD_Char('0');
+        return;
+    }
+    while (num > 0) {
+        buffer[i++] = (num % 10) + '0';
+        num /= 10;
+    }
+    while (i > 0) {
+        LCD_Char(buffer[--i]);
+    }
+}
+
+// ============================================================================
+// BUZZER FUNCTIONS
+// ============================================================================
+void Buzzer_Tone(uint16_t ms) {
+    uint16_t cycles = ms;
+    while (cycles--) {
+        BUZZER = 1;
+        __delay_us(500);
+        BUZZER = 0;
+        __delay_us(500);
+    }
+}
+
+void Buzzer_Beep(uint8_t count) {
+    uint8_t i;
+    for (i = 0; i < count; i++) {
+        Buzzer_Tone(100);
+        __delay_ms(50);
+    }
+}
+
+void Buzzer_Success(void) {
+    Buzzer_Tone(200);
+}
+
+void Buzzer_Error(void) {
+    Buzzer_Tone(50);
+    __delay_ms(50);
+    Buzzer_Tone(50);
+    __delay_ms(50);
+    Buzzer_Tone(50);
+}
+
+// ============================================================================
+// SERVO FUNCTIONS
+// ============================================================================
+void Servo_Init(void) {
+    SERVO_TRIS = 0;
+    SERVO_PIN = 0;
+}
+
+void generate_pulse(unsigned int angle) {
+    unsigned int loops = 50 + angle;
+    SERVO_PIN = 1;
+    while(loops--) {
+        __delay_us(5);
+    }
+    SERVO_PIN = 0;
+    __delay_ms(18);
+}
+
+void Servo_Open(void) {
+    unsigned int angle;
+    uint8_t repeat;
+
+    LCD_Clear();
+    LCD_SetCursor(0, 0);
+    LCD_String("Opening...");
+
+    for (angle = 0; angle <= 180; angle += 2) {
+        generate_pulse(angle);
+    }
+    
+    for (repeat = 0; repeat < 75; repeat++) {
+        generate_pulse(180);
+    }
+
+    LCD_SetCursor(1, 0);
+    LCD_String("Access Granted!");
+    __delay_ms(2000);
+
+    LCD_SetCursor(1, 0);
+    LCD_String("Closing...      ");
+    for (angle = 180; angle >= 2; angle -= 2) {
+        generate_pulse(angle);
+    }
+    generate_pulse(0);
+    
+    for (repeat = 0; repeat < 75; repeat++) {
+        generate_pulse(0);
+    }
+
+    LCD_Clear();
+    LCD_SetCursor(0, 0);
+    LCD_String("Door Closed!");
+    __delay_ms(500);
+}
+
+// ============================================================================
+// UART FUNCTIONS
+// ============================================================================
+void UART_Init(void) {
+    TRISCbits.TRISC6 = 0;  // TX output
+    TRISCbits.TRISC7 = 1;  // RX input
+    SPBRG = 25;            // 9600 baud at 4MHz
+    TXSTA = 0x24;          // TX enable, high speed
+    RCSTA = 0x90;          // Serial port enable, RX enable
+}
+
+void UART_Write(uint8_t data) {
+    while (!TXIF) {};
+    TXREG = data;
+}
+
+uint8_t UART_Read(void) {
+    while (!RCIF) {};
+    return RCREG;
+}
+
+uint8_t UART_Available(void) {
+    return RCIF;
+}
+
+void UART_Flush(void) {
+    while (UART_Available()) {
+        UART_Read();
+    }
+}
+
+// ============================================================================
+// ESP32 COMMUNICATION
+// ============================================================================
+void ESP_SendCommand(uint8_t cmd, uint8_t* data, uint8_t len) {
+    uint8_t checksum = PACKET_HEADER + cmd + len;
+    uint8_t i;
+    
+    UART_Write(PACKET_HEADER);
+    UART_Write(cmd);
+    UART_Write(len);
+    
+    for (i = 0; i < len; i++) {
+        UART_Write(data[i]);
+        checksum += data[i];
+    }
+    
+    UART_Write(checksum);
+    UART_Write(PACKET_FOOTER);
+}
+
+uint8_t ESP_ReceiveResponse(uint8_t* response, uint16_t timeout_ms) {
+    uint16_t count = 0;
+    uint8_t state = 0;
+    uint8_t len = 0;
+    uint8_t idx = 0;
+    
+    while (count < timeout_ms) {
+        if (UART_Available()) {
+            uint8_t b = UART_Read();
+            
+            switch(state) {
+                case 0:  // Wait for header
+                    if (b == PACKET_HEADER) {
+                        response[idx++] = b;
+                        state = 1;
+                    }
+                    break;
+                    
+                case 1:  // Read command
+                    response[idx++] = b;
+                    state = 2;
+                    break;
+                    
+                case 2:  // Read length
+                    response[idx++] = b;
+                    len = b;
+                    state = 3;
+                    break;
+                    
+                case 3:  // Read data
+                    response[idx++] = b;
+                    if (idx >= (3 + len)) {
+                        state = 4;
+                    }
+                    break;
+                    
+                case 4:  // Read checksum
+                    response[idx++] = b;
+                    state = 5;
+                    break;
+                    
+                case 5:  // Read footer
+                    response[idx++] = b;
+                    if (b == PACKET_FOOTER) {
+                        return idx;  // Success
+                    }
+                    return 0;  // Invalid footer
+            }
+        }
+        __delay_ms(1);
+        count++;
+    }
+    return 0;  // Timeout
+}
+
+// ============================================================================
+// BUTTONS
+// ============================================================================
+uint8_t Button_Read_Menu(void) { 
+    if(BTN_MENU) { 
+        __delay_ms(50); 
+        if(BTN_MENU) { 
+            while(BTN_MENU){}; 
+            return 1; 
+        }
+    } 
+    return 0; 
+}
+
+uint8_t Button_Read_Up(void) { 
+    if(BTN_UP) { 
+        __delay_ms(50); 
+        if(BTN_UP) { 
+            while(BTN_UP){}; 
+            return 1; 
+        }
+    } 
+    return 0; 
+}
+
+uint8_t Button_Read_Down(void) { 
+    if(BTN_DOWN) { 
+        __delay_ms(50); 
+        if(BTN_DOWN) { 
+            while(BTN_DOWN){}; 
+            return 1; 
+        }
+    } 
+    return 0; 
+}
+
+uint8_t Button_Read_Confirm(void) { 
+    if(BTN_CONFIRM) { 
+        __delay_ms(50); 
+        if(BTN_CONFIRM) { 
+            while(BTN_CONFIRM){}; 
+            return 1; 
+        }
+    } 
+    return 0; 
+}
+
+uint8_t Button_Read_Pass1(void) { 
+    if(PASS_BTN1) { 
+        __delay_ms(50); 
+        if(PASS_BTN1) { 
+            while(PASS_BTN1){}; 
+            return 1; 
+        }
+    } 
+    return 0; 
+}
+
+uint8_t Button_Read_Pass2(void) { 
+    if(PASS_BTN2) { 
+        __delay_ms(50); 
+        if(PASS_BTN2) { 
+            while(PASS_BTN2){}; 
+            return 1; 
+        }
+    } 
+    return 0; 
+}
+
+uint8_t Button_Read_Pass3(void) { 
+    if(PASS_BTN3) { 
+        __delay_ms(50); 
+        if(PASS_BTN3) { 
+            while(PASS_BTN3){}; 
+            return 1; 
+        }
+    } 
+    return 0; 
+}
+
+uint8_t Button_Read_Pass4(void) { 
+    if(PASS_BTN4) { 
+        __delay_ms(50); 
+        if(PASS_BTN4) { 
+            while(PASS_BTN4){}; 
+            return 1; 
+        }
+    } 
+    return 0; 
+}
+
+// ============================================================================
+// SYSTEM ACTIONS
+// ============================================================================
+void Display_Idle(void) {
+    LCD_Clear();
+    LCD_SetCursor(0, 0);
+    LCD_String("Fingerprint Sec");
+    LCD_SetCursor(1, 0);
+    LCD_String("Press MENU");
+}
+
+void Display_Menu(void) {
+    LCD_Clear();
+    LCD_SetCursor(0, 0);
+    LCD_String(menu_items[menu_index]);
+    LCD_SetCursor(1, 0);
+    LCD_String("UP/DN SEL=CONF");
+}
+
+uint8_t Get_Password_Input(void) {
+    uint8_t inp[4];
+    uint8_t idx = 0;
+    LCD_Clear();
+    LCD_SetCursor(0, 0);
+    LCD_String("Enter Password:");
+    LCD_SetCursor(1, 0);
+    
+    while (idx < 4) {
+        if (Button_Read_Pass1()) {
+            inp[idx++] = 1;
+            LCD_Char('*');
+            Buzzer_Beep(1);
+        } else if (Button_Read_Pass2()) {
+            inp[idx++] = 2;
+            LCD_Char('*');
+            Buzzer_Beep(1);
+        } else if (Button_Read_Pass3()) {
+            inp[idx++] = 3;
+            LCD_Char('*');
+            Buzzer_Beep(1);
+        } else if (Button_Read_Pass4()) {
+            inp[idx++] = 4;
+            LCD_Char('*');
+            Buzzer_Beep(1);
+        }
+    }
+    
+    for (uint8_t i = 0; i < 4; i++) {
+        if (inp[i] != current_password[i]) return 0;
+    }
+    return 1;
+}
+
+void Verify_Fingerprint(void) {
+    uint8_t response[32];
+    uint8_t rx_len;
+    
+    LCD_Clear();
+    LCD_SetCursor(0, 0);
+    LCD_String("Sending Cmd...");
+    
+    // Send verify command to ESP32
+    ESP_SendCommand(PIC_CMD_VERIFY, NULL, 0);
+    
+    // Wait for responses
+    while(1) {
+        rx_len = ESP_ReceiveResponse(response, 10000);  // 10 sec timeout
+        
+        if (rx_len == 0) {
+            LCD_Clear();
+            LCD_String("ESP32 Timeout!");
+            Buzzer_Error();
+            __delay_ms(2000);
+            return;
+        }
+        
+        uint8_t cmd = response[1];
+        
+        if (cmd == ESP_ACK_PROCESSING) {
+            LCD_Clear();
+            LCD_SetCursor(0, 0);
+            LCD_String("Place Finger...");
+        }
+        else if (cmd == ESP_ACK_NO_FINGER) {
+            LCD_SetCursor(1, 0);
+            LCD_String("No Finger!     ");
+            Buzzer_Error();
+            __delay_ms(2000);
+            return;
+        }
+        else if (cmd == ESP_ACK_MATCH_FOUND) {
+            uint16_t id = (response[3] << 8) | response[4];
+            uint16_t score = (response[5] << 8) | response[6];
+            
+            LCD_Clear();
+            LCD_SetCursor(0, 0);
+            LCD_String("Match! ID:");
+            LCD_Number(id);
+            LCD_SetCursor(1, 0);
+            LCD_String("Score:");
+            LCD_Number(score);
+            Buzzer_Success();
+            __delay_ms(1000);
+            
+            Servo_Open();
+            return;
+        }
+        else if (cmd == ESP_ACK_MATCH_NOTFOUND) {
+            LCD_Clear();
+            LCD_String("No Match!");
+            Buzzer_Error();
+            __delay_ms(2000);
+            return;
+        }
+        else if (cmd == ESP_ACK_ERROR) {
+            LCD_Clear();
+            LCD_String("Error!");
+            Buzzer_Error();
+            __delay_ms(2000);
+            return;
+        }
+    }
+}
+
+void Add_Fingerprint(void) {
+    uint8_t response[32];
+    uint8_t rx_len;
+    
+    LCD_Clear();
+    LCD_String("Enrolling...");
+    
+    ESP_SendCommand(PIC_CMD_ENROLL, NULL, 0);
+    
+    while(1) {
+        rx_len = ESP_ReceiveResponse(response, 15000);  // 15 sec timeout
+        
+        if (rx_len == 0) {
+            LCD_Clear();
+            LCD_String("Timeout!");
+            Buzzer_Error();
+            __delay_ms(2000);
+            return;
+        }
+        
+        uint8_t cmd = response[1];
+        
+        if (cmd == ESP_ACK_PROCESSING) {
+            LCD_Clear();
+            LCD_String("Place Finger...");
+        }
+        else if (cmd == ESP_ACK_NO_FINGER) {
+            LCD_SetCursor(1, 0);
+            LCD_String("No Finger!     ");
+        }
+        else if (cmd == ESP_ACK_PLACE_AGAIN) {
+            LCD_Clear();
+            LCD_String("Remove Finger");
+            Buzzer_Beep(1);
+            __delay_ms(1000);
+            LCD_Clear();
+            LCD_String("Place Again...");
+        }
+        else if (cmd == ESP_ACK_ENROLL_SUCCESS) {
+            uint16_t id = (response[3] << 8) | response[4];
+            LCD_Clear();
+            LCD_String("Success! ID:");
+            LCD_Number(id);
+            Buzzer_Success();
+            fingerprint_count++;
+            __delay_ms(2000);
+            return;
+        }
+        else if (cmd == ESP_ACK_ENROLL_FAIL) {
+            LCD_Clear();
+            LCD_String("Enroll Failed!");
+            Buzzer_Error();
+            __delay_ms(2000);
+            return;
+        }
+        else if (cmd == ESP_ACK_ERROR) {
+            LCD_Clear();
+            LCD_String("Error!");
+            Buzzer_Error();
+            __delay_ms(2000);
+            return;
+        }
+    }
+}
+
+void Delete_Fingerprint(void) {
+    uint8_t response[32];
+    uint8_t rx_len;
+    
+    LCD_Clear();
+    LCD_String("Verify to Del");
+    __delay_ms(1000);
+    
+    ESP_SendCommand(PIC_CMD_DELETE, NULL, 0);
+    
+    while(1) {
+        rx_len = ESP_ReceiveResponse(response, 10000);
+        
+        if (rx_len == 0) {
+            LCD_Clear();
+            LCD_String("Timeout!");
+            Buzzer_Error();
+            __delay_ms(2000);
+            return;
+        }
+        
+        uint8_t cmd = response[1];
+        
+        if (cmd == ESP_ACK_PROCESSING) {
+            LCD_Clear();
+            LCD_String("Place Finger...");
+        }
+        else if (cmd == ESP_ACK_NO_FINGER) {
+            LCD_SetCursor(1, 0);
+            LCD_String("No Finger!     ");
+        }
+        else if (cmd == ESP_ACK_DELETE_SUCCESS) {
+            uint16_t id = (response[3] << 8) | response[4];
+            LCD_Clear();
+            LCD_String("Deleted ID:");
+            LCD_Number(id);
+            Buzzer_Success();
+            fingerprint_count--;
+            __delay_ms(2000);
+            return;
+        }
+        else if (cmd == ESP_ACK_DELETE_FAIL) {
+            LCD_Clear();
+            LCD_String("Not Found!");
+            Buzzer_Error();
+            __delay_ms(2000);
+            return;
+        }
+    }
+}
+
+void Password_Open(void) {
+    if (Get_Password_Input()) {
+        LCD_Clear();
+        LCD_String("Pass Correct!");
+        Buzzer_Success();
+        __delay_ms(1000);
+        Servo_Open();
+    } else {
+        LCD_Clear();
+        LCD_String("Wrong Password!");
+        Buzzer_Error();
+        __delay_ms(2000);
+    }
+}
+
+void Change_Password(void) {
+    LCD_Clear();
+    LCD_String("Verify Current:");
+    __delay_ms(1000);
+    
+    if (!Get_Password_Input()) {
+        LCD_Clear();
+        LCD_String("Wrong!");
+        Buzzer_Error();
+        __delay_ms(2000);
+        return;
+    }
+    
+    LCD_Clear();
+    LCD_String("Enter New Pass:");
+    __delay_ms(1000);
+    
+    LCD_Clear();
+    LCD_SetCursor(0, 0);
+    LCD_String("New Password:");
+    LCD_SetCursor(1, 0);
+    
+    uint8_t idx = 0;
+    while (idx < 4) {
+        if (Button_Read_Pass1()) {
+            current_password[idx++] = 1;
+            LCD_Char('*');
+            Buzzer_Beep(1);
+        } else if (Button_Read_Pass2()) {
+            current_password[idx++] = 2;
+            LCD_Char('*');
+            Buzzer_Beep(1);
+        } else if (Button_Read_Pass3()) {
+            current_password[idx++] = 3;
+            LCD_Char('*');
+            Buzzer_Beep(1);
+        } else if (Button_Read_Pass4()) {
+            current_password[idx++] = 4;
+            LCD_Char('*');
+            Buzzer_Beep(1);
+        }
+    }
+    
+    LCD_Clear();
+    LCD_String("Saved!");
+    Buzzer_Success();
+    __delay_ms(2000);
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+void main(void) {
+    // Configure ports
+    TRISB = 0x4F;   // RB0-RB3,RB6 input, RB7 output
+    TRISA = 0x0F;   // RA0-RA3 input (password buttons)
+    TRISC = 0x80;   // RC7 input (UART RX), others output
+    TRISD = 0x00;   // All output (LCD data)
+    
+    PORTA = 0;
+    PORTB = 0;
+    PORTC = 0;
+    PORTD = 0;
+    
+    TRISE = 0x00;
+    ADCON1 = 0x06;  // All digital I/O
+    
+    LCD_Init();
+    UART_Init();
+    Servo_Init();
+    
+    LCD_Clear();
+    LCD_String("Fingerprint Sec");
+    LCD_SetCursor(1, 0);
+    LCD_String("System v3.0");
+    Buzzer_Beep(2);
+    __delay_ms(2000);
+    
+    // Lock servo at 0
+    uint8_t i;
+    for (i = 0; i < 50; i++) {
+        generate_pulse(0);
+    }
+    
+    LCD_Clear();
+    LCD_String("Wait ESP32...");
+    
+    // Wait for ESP32 ready signal
+    uint8_t response[32];
+    uint16_t timeout = 0;
+    while(timeout < 5000) {
+        if (ESP_ReceiveResponse(response, 100)) {
+            if (response[1] == ESP_ACK_READY) {
+                LCD_Clear();
+                LCD_String("ESP32 Ready!");
+                Buzzer_Beep(1);
+                __delay_ms(1000);
+                break;
+            }
+        }
+        timeout += 100;
+    }
+    
+    if (timeout >= 5000) {
+        LCD_Clear();
+        LCD_String("ESP32 Timeout!");
+        LCD_SetCursor(1, 0);
+        LCD_String("Check Wiring");
+        Buzzer_Error();
+        __delay_ms(3000);
+    }
+    
+    Display_Idle();
+    
+    // Main loop
+    while (1) {
+        if (system_state == 0) {  // Idle state
+            if (Button_Read_Menu()) {
+                system_state = 1;
+                menu_index = 0;
+                Display_Menu();
+                Buzzer_Beep(1);
+            }
+            __delay_ms(50);
+        }
+        else if (system_state == 1) {  // Menu state
+            if (Button_Read_Up()) {
+                menu_index = (menu_index > 0) ? menu_index - 1 : 4;
+                Display_Menu();
+                Buzzer_Beep(1);
+            }
+            else if (Button_Read_Down()) {
+                menu_index = (menu_index < 4) ? menu_index + 1 : 0;
+                Display_Menu();
+                Buzzer_Beep(1);
+            }
+            else if (Button_Read_Confirm()) {
+                system_state = 2;
+                Buzzer_Beep(1);
+                
+                switch (menu_index) {
+                    case 0:
+                        Verify_Fingerprint();
+                        break;
+                    case 1:
+                        Add_Fingerprint();
+                        break;
+                    case 2:
+                        Delete_Fingerprint();
+                        break;
+                    case 3:
+                        Password_Open();
+                        break;
+                    case 4:
+                        Change_Password();
+                        break;
+                }
+                
+                system_state = 0;
+                Display_Idle();
+            }
+            else if (Button_Read_Menu()) {
+                system_state = 0;
+                Display_Idle();
+                Buzzer_Beep(1);
+            }
+            __delay_ms(50);
+        }
+    }
+}
